@@ -12,6 +12,7 @@ RTC_DATA_ATTR uint32_t attemptedLocationKey = 0;
 RTC_DATA_ATTR int8_t cachedTemperature = 0;
 RTC_DATA_ATTR uint8_t cachedWeatherCode = 0;
 RTC_DATA_ATTR bool cachedWeatherValid = false;
+RTC_DATA_ATTR bool cachedWeatherStale = false;
 RTC_DATA_ATTR int32_t cachedUtcOffset = 0;
 RTC_DATA_ATTR bool cachedUtcOffsetValid = false;
 RTC_DATA_ATTR int64_t lastWeatherAttempt = -1;
@@ -74,7 +75,7 @@ void WatchyNeonRift::refreshWeather() {
     if (!updateDue) return;
     attemptedLocationKey = locationKey;
     lastWeatherAttempt = minuteStamp; // Also rate-limits retries after a failure.
-    cachedWeatherValid = false;
+    cachedWeatherStale = cachedWeatherValid;
     if (!connectWiFi(10000)) return;
 
     bool haveLocation = locationReady;
@@ -123,6 +124,7 @@ bool WatchyNeonRift::loadCachedLocation(uint32_t locationKey) {
     cachedLocationKey = locationKey;
     cachedLocationValid = false;
     cachedWeatherValid = false;
+    cachedWeatherStale = false;
     cachedUtcOffsetValid = false;
     Preferences preferences;
     if (!preferences.begin("neonrift", true)) return false;
@@ -250,6 +252,7 @@ bool WatchyNeonRift::fetchOpenMeteoWeather(int32_t &utcOffset) {
     cachedTemperature = constrain(temperature, -127, 127);
     cachedWeatherCode = static_cast<uint8_t>(responseWeatherCode);
     cachedWeatherValid = true;
+    cachedWeatherStale = false;
     return true;
 }
 
@@ -411,7 +414,8 @@ void WatchyNeonRift::drawDataPanel() {
 
     int16_t temperatureValue = cachedTemperature;
     const bool isMetric = settings.weatherUnit != "imperial";
-    const char *condition = getWeatherLabel(cachedWeatherCode);
+    const char *condition = cachedWeatherStale
+        ? "STALE" : getWeatherLabel(cachedWeatherCode);
     if (!cachedWeatherValid) {
         temperatureValue = sensor.readTemperature();
         if (!isMetric) temperatureValue = temperatureValue * 9 / 5 + 32;

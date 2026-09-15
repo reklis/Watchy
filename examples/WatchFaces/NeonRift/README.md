@@ -48,8 +48,10 @@ changes. Failed requests are retried no more than once per weather interval.
 Weather refreshes every three hours by default. NTP synchronizes daily, or
 immediately when the resolved timezone offset changes for travel or daylight
 saving time. Both intervals are configurable in `settings.h`.
-If networking fails, the display falls back to Watchy's onboard temperature
-and the configured or most recently resolved UTC offset.
+If an update fails, the last successful weather reading remains visible and is
+marked `STALE`; before the first successful update, the display falls back to
+Watchy's onboard temperature as `LOCAL`. Timekeeping continues with the
+configured or most recently resolved UTC offset.
 
 ## Preview
 
