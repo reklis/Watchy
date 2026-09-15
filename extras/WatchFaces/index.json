@@ -23,7 +23,7 @@
             "screenshot" : "https://raw.githubusercontent.com/sqfmi/Watchy/master/extras/WatchFaces/2_7_SEG_LIGHT.png",
             "source" : "https://github.com/sqfmi/Watchy/tree/master/examples/WatchFaces/7_SEG",
             "version" : "1.0.0"
-        },        
+        },
         {
             "id" : "3",
             "name" : "DOS",
@@ -71,6 +71,14 @@
             "screenshot" : "https://raw.githubusercontent.com/sqfmi/Watchy/master/extras/WatchFaces/8_Bahn.png",
             "source" : "https://github.com/BraininaBowl/Bahn-for-Watchy",
             "version" : "1.0.0"
-        }                                      
+        },
+        {
+            "id" : "9",
+            "name" : "NeonRift",
+            "author" : "Watchy Contributors",
+            "screenshot" : "https://raw.githubusercontent.com/sqfmi/Watchy/master/extras/WatchFaces/9_NeonRift.png",
+            "source" : "https://github.com/sqfmi/Watchy/tree/master/examples/WatchFaces/NeonRift",
+            "version" : "1.0.0"
+        }
     ]
 }
