@@ -8,7 +8,7 @@ It shows:
 - day, date, and year
 - lunar phase and illumination percentage
 - step count
-- local temperature, or live weather when an OpenWeatherMap key is configured
+- local temperature fallback and key-free live weather for a configured postal code
 - battery percentage and segmented gauge
 - Wi-Fi, Bluetooth, and USB power status (USB power is available on Watchy v3)
 
@@ -20,10 +20,36 @@ face has no external asset or font dependency.
 ## Install
 
 1. Open `NeonRift.ino` in Arduino IDE.
-2. Set `GMT_OFFSET_SEC` in `settings.h` for your timezone.
-3. Optionally set `CITY_ID` and `OPENWEATHERMAP_APIKEY` for live weather. With
-   no API key, the face shows the onboard temperature as `LOCAL`.
+2. Set `POSTAL_CODE` and the two-letter `COUNTRY_CODE` in `settings.h`.
+3. Choose `metric` or `imperial` with `WEATHER_UNIT`.
 4. Select your Watchy board and upload.
+
+## Compile with Devbox
+
+The repository includes a reproducible Arduino CLI environment using the same
+ESP32 core version as CI. Install the board core and libraries once, then build
+the revision matching your hardware:
+
+```sh
+devbox run setup
+devbox run build-v10 # Watchy PCB v1.0
+devbox run build-v20 # Watchy PCB v2.0
+devbox run build-v30 # Watchy PCB v3.0 / current SQFMI-WATCHY-10
+```
+
+Firmware binaries are written under `.devbox/build/<revision>/`.
+
+NeonRift resolves the postal code through [Zippopotam.us](https://www.zippopotam.us/),
+then gets current weather and the local UTC offset from
+[Open-Meteo](https://open-meteo.com/). Neither service requires an API key.
+The resolved coordinates are stored in ESP32 NVS and reused through power
+cycles; a successful lookup runs again only when the postal or country setting
+changes. Failed requests are retried no more than once per weather interval.
+Weather refreshes every three hours by default. NTP synchronizes daily, or
+immediately when the resolved timezone offset changes for travel or daylight
+saving time. Both intervals are configurable in `settings.h`.
+If networking fails, the display falls back to Watchy's onboard temperature
+and the configured or most recently resolved UTC offset.
 
 ## Preview
 

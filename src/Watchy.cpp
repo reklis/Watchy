@@ -693,7 +693,7 @@ weatherData Watchy::getWeatherData() {
 
 weatherData Watchy::_getWeatherData(String cityID, String lat, String lon, String units, String lang,
                                    String url, String apiKey,
-                                   uint8_t updateInterval) {
+                                   uint16_t updateInterval) {
   currentWeather.isMetric = units == String("metric");
   if (weatherIntervalCounter < 0) { //-1 on first run, set to updateInterval
     weatherIntervalCounter = updateInterval;
@@ -956,22 +956,30 @@ void Watchy::_configModeCallback(WiFiManager *myWiFiManager) {
 }
 
 bool Watchy::connectWiFi() {
+  return connectWiFi(60000);
+}
+
+bool Watchy::connectWiFi(uint32_t timeoutMs) {
   if (WL_CONNECT_FAILED ==
       WiFi.begin()) { // WiFi not setup, you can also use hard coded credentials
                       // with WiFi.begin(SSID,PASS);
     WIFI_CONFIGURED = false;
   } else {
-    if (WL_CONNECTED ==
-        WiFi.waitForConnectResult()) { // attempt to connect for 10s
+    const uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+      delay(100);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
       lastIPAddress = WiFi.localIP();
       WiFi.SSID().toCharArray(lastSSID, 30);
       WIFI_CONFIGURED = true;
-    } else { // connection failed, time out
+    } else {
       WIFI_CONFIGURED = false;
-      // turn off radios
-      WiFi.mode(WIFI_OFF);
-      btStop();
     }
+  }
+  if (!WIFI_CONFIGURED) {
+    WiFi.mode(WIFI_OFF);
+    btStop();
   }
   return WIFI_CONFIGURED;
 }
@@ -1136,6 +1144,11 @@ bool Watchy::syncNTP() { // NTP sync - call after connecting to WiFi and
 
 bool Watchy::syncNTP(long gmt) {
   return syncNTP(gmt, settings.ntpServer.c_str());
+}
+
+void Watchy::setTimezoneOffset(long gmt) {
+  gmtOffset = gmt;
+  settings.gmtOffset = gmt;
 }
 
 bool Watchy::syncNTP(long gmt, String ntpServer) {

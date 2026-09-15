@@ -1,0 +1,7 @@
+board_manager:
+  additional_urls:
+    - https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+directories:
+  data: .devbox/arduino/data
+  downloads: .devbox/arduino/downloads
+  user: .devbox/arduino/user

@@ -2,20 +2,22 @@
 #define SETTINGS_H
 
 #define NTP_SERVER "pool.ntp.org"
-#define GMT_OFFSET_SEC 0 // Change to your UTC offset in seconds.
-#define CITY_ID "5128581" // New York City; use your OpenWeatherMap city ID.
-#define OPENWEATHERMAP_APIKEY "" // Empty uses Watchy's onboard temperature sensor.
-#define OPENWEATHERMAP_URL "http://api.openweathermap.org/data/2.5/weather?id={cityID}&lang={lang}&units={units}&appid={apiKey}"
+#define GMT_OFFSET_SEC 0 // Used until the first successful weather update.
+#define POSTAL_CODE "10001"
+#define COUNTRY_CODE "US" // Two-letter ISO country code.
+#define WEATHER_UNIT "metric" // "metric" for Celsius, "imperial" for Fahrenheit.
+#define WEATHER_UPDATE_INTERVAL 180 // Fetch weather every three hours.
+#define NTP_SYNC_INTERVAL 1440 // Sync daily, or immediately when timezone changes.
 
 watchySettings settings{
-    .cityID = CITY_ID,
+    .cityID = "",
     .lat = "",
     .lon = "",
-    .weatherAPIKey = OPENWEATHERMAP_APIKEY,
-    .weatherURL = OPENWEATHERMAP_URL,
-    .weatherUnit = "metric",
+    .weatherAPIKey = "",
+    .weatherURL = "",
+    .weatherUnit = WEATHER_UNIT,
     .weatherLang = "en",
-    .weatherUpdateInterval = 30,
+    .weatherUpdateInterval = WEATHER_UPDATE_INTERVAL,
     .ntpServer = NTP_SERVER,
     .gmtOffset = GMT_OFFSET_SEC,
     .vibrateOClock = true,

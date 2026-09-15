@@ -4,12 +4,24 @@
 #include <Watchy.h>
 
 class WatchyNeonRift : public Watchy {
-    using Watchy::Watchy;
-
 public:
+    WatchyNeonRift(const watchySettings &settings, const char *postalCode,
+                   const char *countryCode, uint16_t ntpSyncInterval);
     void drawWatchFace() override;
 
 private:
+    const char *postalCode;
+    const char *countryCode;
+    uint16_t ntpSyncInterval;
+
+    void refreshWeather();
+    bool loadCachedLocation(uint32_t locationKey);
+    bool geocodePostalCode(uint32_t locationKey);
+    bool fetchOpenMeteoWeather(int32_t &utcOffset);
+    uint32_t getLocationKey() const;
+    int64_t getMinuteStamp() const;
+    String urlEncode(const char *value) const;
+    const char *getWeatherLabel(uint8_t code) const;
     void drawFrame();
     void drawLunarCycle();
     void drawClock();

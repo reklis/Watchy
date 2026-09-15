@@ -1,4 +1,23 @@
 #include "Watchy_NeonRift.h"
+#include <Preferences.h>
+#include <cmath>
+
+namespace {
+RTC_DATA_ATTR uint32_t cachedLocationKey = 0;
+RTC_DATA_ATTR bool locationCacheChecked = false;
+RTC_DATA_ATTR float cachedLatitude = 0.0f;
+RTC_DATA_ATTR float cachedLongitude = 0.0f;
+RTC_DATA_ATTR bool cachedLocationValid = false;
+RTC_DATA_ATTR uint32_t attemptedLocationKey = 0;
+RTC_DATA_ATTR int8_t cachedTemperature = 0;
+RTC_DATA_ATTR uint8_t cachedWeatherCode = 0;
+RTC_DATA_ATTR bool cachedWeatherValid = false;
+RTC_DATA_ATTR int32_t cachedUtcOffset = 0;
+RTC_DATA_ATTR bool cachedUtcOffsetValid = false;
+RTC_DATA_ATTR int64_t lastWeatherAttempt = -1;
+RTC_DATA_ATTR int64_t lastNtpSync = -1;
+RTC_DATA_ATTR bool timezoneSyncPending = false;
+}
 
 // Compact 3x5 font: 0-9 followed by A-Z. It keeps every label crisp at the
 // Watchy's native 200x200 resolution and avoids bundling another font.
@@ -23,13 +42,266 @@ static const uint8_t LARGE_DIGITS[10][7] PROGMEM = {
     {14, 17, 17, 14, 17, 17, 14}, {14, 17, 17, 15, 1, 1, 14}
 };
 
+WatchyNeonRift::WatchyNeonRift(const watchySettings &settings,
+                               const char *postalCode,
+                               const char *countryCode,
+                               uint16_t ntpSyncInterval)
+    : Watchy(settings), postalCode(postalCode), countryCode(countryCode),
+      ntpSyncInterval(ntpSyncInterval) {}
+
 void WatchyNeonRift::drawWatchFace() {
+    refreshWeather();
     display.fillScreen(GxEPD_BLACK);
     drawFrame();
     drawLunarCycle();
     drawClock();
     drawDataPanel();
     drawStatusBar();
+}
+
+void WatchyNeonRift::refreshWeather() {
+    const uint32_t locationKey = getLocationKey();
+    const bool locationReady = loadCachedLocation(locationKey);
+    if (cachedUtcOffsetValid) setTimezoneOffset(cachedUtcOffset);
+    const int64_t minuteStamp = getMinuteStamp();
+    const uint16_t updateInterval = settings.weatherUpdateInterval > 5
+        ? settings.weatherUpdateInterval : 180;
+    const bool clockMovedBack = lastWeatherAttempt > minuteStamp;
+    const bool postalCodeChanged = attemptedLocationKey != locationKey;
+    const bool updateDue = postalCodeChanged || lastWeatherAttempt < 0 ||
+        clockMovedBack || minuteStamp - lastWeatherAttempt >= updateInterval;
+
+    if (!updateDue) return;
+    attemptedLocationKey = locationKey;
+    lastWeatherAttempt = minuteStamp; // Also rate-limits retries after a failure.
+    cachedWeatherValid = false;
+    if (!connectWiFi(10000)) return;
+
+    bool haveLocation = locationReady;
+    if (!haveLocation) {
+        haveLocation = geocodePostalCode(locationKey);
+    }
+
+    int32_t utcOffset = cachedUtcOffsetValid ? cachedUtcOffset : settings.gmtOffset;
+    bool timezoneChanged = false;
+    if (haveLocation && fetchOpenMeteoWeather(utcOffset)) {
+        timezoneChanged = !cachedUtcOffsetValid || cachedUtcOffset != utcOffset;
+        if (timezoneChanged) timezoneSyncPending = true;
+        cachedUtcOffset = utcOffset;
+        cachedUtcOffsetValid = true;
+        setTimezoneOffset(utcOffset);
+        if (timezoneChanged) {
+            Preferences preferences;
+            if (preferences.begin("neonrift", false)) {
+                preferences.putLong("utcOffset", utcOffset);
+                preferences.putBool("tzValid", true);
+                preferences.end();
+            }
+        }
+    }
+
+    // Weather can refresh without an NTP exchange. Sync daily, immediately
+    // after a timezone/DST change, or after a clock reset.
+    const uint16_t syncInterval = ntpSyncInterval > 0 ? ntpSyncInterval : 1440;
+    const bool ntpDue = timezoneSyncPending || lastNtpSync < 0 ||
+        lastNtpSync > minuteStamp || minuteStamp - lastNtpSync >= syncInterval;
+    if (ntpDue && syncNTP(utcOffset)) {
+        RTC.read(currentTime);
+        lastNtpSync = getMinuteStamp();
+        lastWeatherAttempt = lastNtpSync;
+        timezoneSyncPending = false;
+    }
+
+    WiFi.mode(WIFI_OFF);
+    btStop();
+}
+
+bool WatchyNeonRift::loadCachedLocation(uint32_t locationKey) {
+    if (locationCacheChecked && cachedLocationKey == locationKey) return cachedLocationValid;
+
+    locationCacheChecked = true;
+    cachedLocationKey = locationKey;
+    cachedLocationValid = false;
+    cachedWeatherValid = false;
+    cachedUtcOffsetValid = false;
+    Preferences preferences;
+    if (!preferences.begin("neonrift", true)) return false;
+    const bool matches = preferences.getBool("locValid", false) &&
+        preferences.getUInt("locKey", 0) == locationKey;
+    if (matches) {
+        const float latitude = preferences.getFloat("latitude", NAN);
+        const float longitude = preferences.getFloat("longitude", NAN);
+        if (std::isfinite(latitude) && std::isfinite(longitude) &&
+            latitude >= -90.0f && latitude <= 90.0f &&
+            longitude >= -180.0f && longitude <= 180.0f) {
+            cachedLatitude = latitude;
+            cachedLongitude = longitude;
+            cachedLocationKey = locationKey;
+            cachedLocationValid = true;
+            cachedUtcOffset = preferences.getLong("utcOffset", settings.gmtOffset);
+            cachedUtcOffsetValid = preferences.getBool("tzValid", false) &&
+                cachedUtcOffset >= -50400 && cachedUtcOffset <= 50400;
+        }
+    }
+    preferences.end();
+    return cachedLocationValid;
+}
+
+bool WatchyNeonRift::geocodePostalCode(uint32_t locationKey) {
+    if (postalCode == nullptr || postalCode[0] == '\0' ||
+        countryCode == nullptr || countryCode[0] == '\0') return false;
+
+    String url = "https://api.zippopotam.us/";
+    url += urlEncode(countryCode);
+    url += "/";
+    url += urlEncode(postalCode);
+
+    HTTPClient http;
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
+    http.begin(url.c_str());
+    const int responseCode = http.GET();
+    if (responseCode != 200) {
+        http.end();
+        return false;
+    }
+    const String payload = http.getString();
+    http.end();
+
+    JSONVar response = JSON.parse(payload);
+    if (JSON.typeof(response) == "undefined" ||
+        JSON.typeof(response["places"]) != "array" ||
+        response["places"].length() == 0) return false;
+    JSONVar place = response["places"][0];
+    if (JSON.typeof(place["latitude"]) != "string" ||
+        JSON.typeof(place["longitude"]) != "string") return false;
+
+    const char *latitude = static_cast<const char *>(place["latitude"]);
+    const char *longitude = static_cast<const char *>(place["longitude"]);
+    if (latitude == nullptr || longitude == nullptr) return false;
+    char *latitudeEnd;
+    char *longitudeEnd;
+    const double parsedLatitude = strtod(latitude, &latitudeEnd);
+    const double parsedLongitude = strtod(longitude, &longitudeEnd);
+    if (latitudeEnd == latitude || *latitudeEnd != '\0' ||
+        longitudeEnd == longitude || *longitudeEnd != '\0' ||
+        !std::isfinite(parsedLatitude) || !std::isfinite(parsedLongitude) ||
+        parsedLatitude < -90.0 || parsedLatitude > 90.0 ||
+        parsedLongitude < -180.0 || parsedLongitude > 180.0) return false;
+
+    cachedLatitude = parsedLatitude;
+    cachedLongitude = parsedLongitude;
+    cachedLocationKey = locationKey;
+    cachedLocationValid = true;
+
+    // NVS survives power loss and firmware uploads. Mark the cache valid only
+    // after every value is written, so an interrupted write cannot be reused.
+    Preferences preferences;
+    if (preferences.begin("neonrift", false)) {
+        preferences.putBool("locValid", false);
+        preferences.putBool("tzValid", false);
+        const bool stored = preferences.putFloat("latitude", cachedLatitude) == sizeof(float) &&
+            preferences.putFloat("longitude", cachedLongitude) == sizeof(float) &&
+            preferences.putUInt("locKey", locationKey) == sizeof(uint32_t);
+        if (stored) preferences.putBool("locValid", true);
+        preferences.end();
+    }
+    return true;
+}
+
+bool WatchyNeonRift::fetchOpenMeteoWeather(int32_t &utcOffset) {
+    String url = "https://api.open-meteo.com/v1/forecast?latitude=";
+    url += String(cachedLatitude, 6);
+    url += "&longitude=";
+    url += String(cachedLongitude, 6);
+    url += "&current=temperature_2m,weather_code&temperature_unit=";
+    url += settings.weatherUnit == "imperial" ? "fahrenheit" : "celsius";
+    url += "&timezone=auto&forecast_days=1";
+
+    HTTPClient http;
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
+    http.begin(url.c_str());
+    const int responseCode = http.GET();
+    if (responseCode != 200) {
+        http.end();
+        return false;
+    }
+    const String payload = http.getString();
+    http.end();
+
+    JSONVar response = JSON.parse(payload);
+    if (JSON.typeof(response) == "undefined" ||
+        JSON.typeof(response["current"]) != "object" ||
+        JSON.typeof(response["current"]["temperature_2m"]) != "number" ||
+        JSON.typeof(response["current"]["weather_code"]) != "number") return false;
+
+    const double responseTemperature = static_cast<double>(response["current"]["temperature_2m"]);
+    const int responseWeatherCode = static_cast<int>(response["current"]["weather_code"]);
+    if (!std::isfinite(responseTemperature) || responseWeatherCode < 0 || responseWeatherCode > 99) {
+        return false;
+    }
+    if (JSON.typeof(response["utc_offset_seconds"]) == "number") {
+        const int32_t responseOffset = static_cast<int32_t>(
+            static_cast<int>(response["utc_offset_seconds"]));
+        if (responseOffset >= -50400 && responseOffset <= 50400) utcOffset = responseOffset;
+    }
+    const int16_t temperature = round(responseTemperature);
+    cachedTemperature = constrain(temperature, -127, 127);
+    cachedWeatherCode = static_cast<uint8_t>(responseWeatherCode);
+    cachedWeatherValid = true;
+    return true;
+}
+
+uint32_t WatchyNeonRift::getLocationKey() const {
+    uint32_t hash = 2166136261UL;
+    const char *parts[] = {countryCode, "|", postalCode};
+    for (const char *part : parts) {
+        if (part == nullptr) continue;
+        while (*part) {
+            hash ^= static_cast<uint8_t>(*part++);
+            hash *= 16777619UL;
+        }
+    }
+    return hash;
+}
+
+int64_t WatchyNeonRift::getMinuteStamp() const {
+    const int32_t month = currentTime.Month;
+    const int32_t a = (14 - month) / 12;
+    const int32_t year = tmYearToCalendar(currentTime.Year) + 4800 - a;
+    const int32_t adjustedMonth = month + 12 * a - 3;
+    const int32_t day = currentTime.Day + (153 * adjustedMonth + 2) / 5 +
+        365 * year + year / 4 - year / 100 + year / 400 - 32045;
+    return static_cast<int64_t>(day) * 1440 + currentTime.Hour * 60 + currentTime.Minute;
+}
+
+String WatchyNeonRift::urlEncode(const char *value) const {
+    String encoded;
+    while (value != nullptr && *value) {
+        const uint8_t character = static_cast<uint8_t>(*value++);
+        if ((character >= 'a' && character <= 'z') ||
+            (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || character == '-' ||
+            character == '_' || character == '.' || character == '~') {
+            encoded += static_cast<char>(character);
+        } else {
+            char escaped[4];
+            snprintf(escaped, sizeof(escaped), "%%%02X", character);
+            encoded += escaped;
+        }
+    }
+    return encoded;
+}
+
+const char *WatchyNeonRift::getWeatherLabel(uint8_t code) const {
+    if (code == 0) return "CLEAR";
+    if (code <= 3) return "CLOUD";
+    if (code == 45 || code == 48) return "MIST";
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "RAIN";
+    if ((code >= 71 && code <= 77) || code == 85 || code == 86) return "SNOW";
+    if (code >= 95) return "STORM";
+    return "MIXED";
 }
 
 void WatchyNeonRift::drawFrame() {
@@ -137,31 +409,17 @@ void WatchyNeonRift::drawDataPanel() {
     drawTinyText(steps, 80, 121, 2);
     drawTinyText("DAILY", 80, 143);
 
-    weatherData weather{};
-    if (settings.weatherAPIKey.length() > 0) {
-        weather = getWeatherData();
-    } else {
-        int16_t localTemperature = sensor.readTemperature();
-        weather.isMetric = settings.weatherUnit == "metric";
-        if (!weather.isMetric) {
-            localTemperature = localTemperature * 9 / 5 + 32;
-        }
-        weather.temperature = localTemperature;
-        weather.external = false;
+    int16_t temperatureValue = cachedTemperature;
+    const bool isMetric = settings.weatherUnit != "imperial";
+    const char *condition = getWeatherLabel(cachedWeatherCode);
+    if (!cachedWeatherValid) {
+        temperatureValue = sensor.readTemperature();
+        if (!isMetric) temperatureValue = temperatureValue * 9 / 5 + 32;
+        condition = "LOCAL";
     }
     char temperature[6];
-    snprintf(temperature, sizeof(temperature), "%d%c", weather.temperature,
-             weather.isMetric ? 'C' : 'F');
-    const int16_t code = weather.weatherConditionCode;
-    const char *condition = "LOCAL";
-    if (weather.external) {
-        if (code >= 200 && code < 300) condition = "STORM";
-        else if (code >= 300 && code < 600) condition = "RAIN";
-        else if (code >= 600 && code < 700) condition = "SNOW";
-        else if (code >= 700 && code < 800) condition = "MIST";
-        else if (code == 800) condition = "CLEAR";
-        else if (code > 800) condition = "CLOUD";
-    }
+    snprintf(temperature, sizeof(temperature), "%d%c", temperatureValue,
+             isMetric ? 'C' : 'F');
     drawTinyText("WEATHER", 141, 109);
     drawTinyText(temperature, 141, 121, 2);
     drawTinyText(condition, 141, 143);

@@ -54,7 +54,7 @@ typedef struct watchySettings {
   String weatherURL;
   String weatherUnit;
   String weatherLang;
-  int8_t weatherUpdateInterval;
+  uint16_t weatherUpdateInterval;
   // NTP Settings
   String ntpServer;
   int gmtOffset;
@@ -92,9 +92,11 @@ public:
   bool syncNTP();
   bool syncNTP(long gmt);
   bool syncNTP(long gmt, String ntpServer);
+  void setTimezoneOffset(long gmt);
   void setTime();
   void setupWifi();
   bool connectWiFi();
+  bool connectWiFi(uint32_t timeoutMs);
   weatherData getWeatherData();
   void updateFWBegin();
 
@@ -110,7 +112,7 @@ private:
   static uint16_t _writeRegister(uint8_t address, uint8_t reg, uint8_t *data,
                                  uint16_t len);
   weatherData _getWeatherData(String cityID, String lat, String lon, String units, String lang,
-                             String url, String apiKey, uint8_t updateInterval);                                 
+                             String url, String apiKey, uint16_t updateInterval);
 };
 
 extern RTC_DATA_ATTR int guiState;

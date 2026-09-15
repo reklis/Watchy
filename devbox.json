@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.17.2/.schema/devbox.schema.json",
+  "packages": [
+    "arduino-cli@1.5.1",
+    "python313@latest",
+    "python313Packages.pyserial@latest",
+    "python313Packages.reedsolo@latest",
+    "python313Packages.bitstring@latest"
+  ],
+  "shell": {
+    "init_hook": [],
+    "scripts": {
+      "setup": [
+        "arduino-cli core update-index --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli core install esp32:esp32@2.0.17 --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install \"Adafruit GFX Library\" --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install Arduino_JSON --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install DS3232RTC --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install NTPClient --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install Rtc_Pcf8563 --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install GxEPD2 --config-file \"$PWD/arduino-cli.yaml\"",
+        "arduino-cli lib install WiFiManager --config-file \"$PWD/arduino-cli.yaml\""
+      ],
+      "build-v10": [
+        "arduino-cli compile --config-file \"$PWD/arduino-cli.yaml\" --fqbn \"esp32:esp32:watchy:Revision=v10,PartitionScheme=huge_app,UploadSpeed=921600,DebugLevel=none,EraseFlash=none\" --library \"$PWD\" --build-path \"$PWD/.devbox/build/v10\" \"$PWD/examples/WatchFaces/NeonRift\""
+      ],
+      "build-v20": [
+        "arduino-cli compile --config-file \"$PWD/arduino-cli.yaml\" --fqbn \"esp32:esp32:watchy:Revision=v20,PartitionScheme=huge_app,UploadSpeed=921600,DebugLevel=none,EraseFlash=none\" --library \"$PWD\" --build-path \"$PWD/.devbox/build/v20\" \"$PWD/examples/WatchFaces/NeonRift\""
+      ],
+      "build-v30": [
+        "arduino-cli compile --config-file \"$PWD/arduino-cli.yaml\" --fqbn \"esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,UploadSpeed=921600,DebugLevel=none,EraseFlash=none\" --library \"$PWD\" --build-path \"$PWD/.devbox/build/v30\" \"$PWD/examples/WatchFaces/NeonRift\""
+      ]
+    }
+  }
+}
