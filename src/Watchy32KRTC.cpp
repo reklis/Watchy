@@ -14,18 +14,26 @@ void Watchy32KRTC::init() {
 */
 
 void Watchy32KRTC::config(String datetime) { // String datetime format is YYYY:MM:DD:HH:MM:SS
+    if (datetime.isEmpty()) {
+        return;
+    }
+
     struct tm timeInfo;
     memset(&timeInfo, 0, sizeof(timeInfo));
 
-    // Parse the time string
+    // Do not overwrite the running RTC when no valid initial time was supplied.
     if (strptime(datetime.c_str(), "%Y:%m:%d:%H:%M:%S", &timeInfo) == NULL) {
-        // Failed to parse the time string
+        return;
     }
+    timeInfo.tm_isdst = -1;
 
     // Convert tm to timeval
     struct timeval tv;
     tv.tv_sec = mktime(&timeInfo);
     tv.tv_usec = 0;
+    if (tv.tv_sec == (time_t)-1) {
+        return;
+    }
 
     // Set the time using settimeofday
     if (settimeofday(&tv, NULL) != 0) {
@@ -56,12 +64,14 @@ void Watchy32KRTC::read(tmElements_t &tm) {
 
 void Watchy32KRTC::set(tmElements_t tm) {
   struct tm timeInfo;
-  timeInfo.tm_year = tm.Year + 70;
-  timeInfo.tm_mon  = tm.Month - 1;
-  timeInfo.tm_mday = tm.Day;
-  timeInfo.tm_hour = tm.Hour;
-  timeInfo.tm_min  = tm.Minute;
-  timeInfo.tm_sec  = tm.Second;
+  memset(&timeInfo, 0, sizeof(timeInfo));
+  timeInfo.tm_year  = tm.Year + 70;
+  timeInfo.tm_mon   = tm.Month - 1;
+  timeInfo.tm_mday  = tm.Day;
+  timeInfo.tm_hour  = tm.Hour;
+  timeInfo.tm_min   = tm.Minute;
+  timeInfo.tm_sec   = tm.Second;
+  timeInfo.tm_isdst = -1;
 
   // Convert tm to timeval
   struct timeval tv;

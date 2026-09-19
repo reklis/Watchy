@@ -428,19 +428,14 @@ void Watchy::setTime() {
 
   RTC.read(currentTime);
 
-  #ifdef ARDUINO_ESP32S3_DEV
-  uint8_t minute = currentTime.Minute;
-  uint8_t hour   = currentTime.Hour;
-  uint8_t day    = currentTime.Day;
-  uint8_t month  = currentTime.Month;
-  uint8_t year   = currentTime.Year;  
-  #else
   int8_t minute = currentTime.Minute;
   int8_t hour   = currentTime.Hour;
   int8_t day    = currentTime.Day;
   int8_t month  = currentTime.Month;
-  int8_t year   = tmYearToY2k(currentTime.Year);
-  #endif
+  const int calendarYear = tmYearToCalendar(currentTime.Year);
+  int8_t year = calendarYear >= 2000 && calendarYear <= 2099
+                    ? calendarYear - 2000
+                    : 0;
 
   int8_t setIndex = SET_HOUR;
 
@@ -576,11 +571,7 @@ void Watchy::setTime() {
   tmElements_t tm;
   tm.Month  = month;
   tm.Day    = day;
-  #ifdef ARDUINO_ESP32S3_DEV
-  tm.Year   = year;
-  #else
   tm.Year   = y2kYearToTm(year);
-  #endif
   tm.Hour   = hour;
   tm.Minute = minute;
   tm.Second = 0;
