@@ -193,10 +193,10 @@ def png_bytes(scale):
     width, height = W * scale, H * scale
     raw = bytearray()
     for row in pixels:
-        raw.append(0)
         expanded = [channel for px in row for channel in ((255,) * scale if px else (0,) * scale)]
         scanline = bytes(expanded)
         for _ in range(scale):
+            raw.append(0)
             raw.extend(scanline)
     def chunk(name, data):
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data) & 0xFFFFFFFF)
