@@ -106,6 +106,18 @@ public:
 
 private:
   void _bmaConfig();
+  void _showClockTools();
+  void _showAlarmEditor();
+  void _showCountdownEditor();
+  void _showStopwatch();
+  void _drawClockToolsMenu(uint8_t selected, bool partialRefresh);
+  int8_t _waitForClockToolsButton(uint32_t timeoutMs = 15000);
+  void _loadClockToolsState();
+  void _saveClockToolsState();
+  bool _checkClockToolsEvents();
+  void _showClockToolsAlert();
+  void _rebaseClockTools(uint32_t oldEpoch, uint32_t newEpoch);
+  uint32_t _clockEpoch();
   static void _configModeCallback(WiFiManager *myWiFiManager);
   static uint16_t _readRegister(uint8_t address, uint8_t reg, uint8_t *data,
                                 uint16_t len);

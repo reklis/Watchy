@@ -1,4 +1,5 @@
 #include "Watchy.h"
+#include <Preferences.h>
 
 #ifdef ARDUINO_ESP32S3_DEV
   Watchy32KRTC Watchy::RTC;
@@ -24,6 +25,57 @@ RTC_DATA_ATTR tmElements_t bootTime;
 RTC_DATA_ATTR uint32_t lastIPAddress;
 RTC_DATA_ATTR char lastSSID[30];
 
+namespace {
+constexpr uint32_t CLOCK_TOOLS_MAGIC = 0x434C4B31;
+constexpr uint8_t CLOCK_ALERT_ALARM = 0x01;
+constexpr uint8_t CLOCK_ALERT_TIMER = 0x02;
+
+enum ClockToolsButton : int8_t {
+  CLOCK_BUTTON_ALERT = -2,
+  CLOCK_BUTTON_TIMEOUT = -1,
+  CLOCK_BUTTON_MENU,
+  CLOCK_BUTTON_BACK,
+  CLOCK_BUTTON_UP,
+  CLOCK_BUTTON_DOWN
+};
+
+struct ClockToolsData {
+  uint32_t magic;
+  bool alarmEnabled;
+  uint8_t alarmHour;
+  uint8_t alarmMinute;
+  uint32_t lastAlarmDay;
+  bool countdownActive;
+  uint16_t countdownPresetMinutes;
+  uint32_t countdownEnd;
+  bool stopwatchRunning;
+  uint32_t stopwatchStarted;
+  uint32_t stopwatchElapsed;
+  uint8_t alertFlags;
+  uint32_t lastEventCheck;
+};
+
+RTC_DATA_ATTR ClockToolsData clockToolsData;
+
+bool clockToolsButtonPressed(uint8_t pin) {
+  return digitalRead(pin) == ACTIVE_LOW;
+}
+
+void printTwoDigits(uint32_t value) {
+  if (value < 10) {
+    Watchy::display.print("0");
+  }
+  Watchy::display.print(value);
+}
+
+bool clockToolsClockIsValid(const tmElements_t &time) {
+  int year = tmYearToCalendar(time.Year);
+  return year >= 2020 && year <= 2099 && time.Month >= 1 &&
+         time.Month <= 12 && time.Day >= 1 && time.Day <= 31 &&
+         time.Hour <= 23 && time.Minute <= 59 && time.Second <= 59;
+}
+} // namespace
+
 void Watchy::init(String datetime) {
   esp_sleep_wakeup_cause_t wakeup_reason;
   wakeup_reason = esp_sleep_get_wakeup_cause(); // get wake up reason
@@ -35,22 +87,24 @@ void Watchy::init(String datetime) {
   RTC.init();
   // Init the display since is almost sure we will use it
   display.epd2.initWatchy();
+  _loadClockToolsState();
 
   switch (wakeup_reason) {
   #ifdef ARDUINO_ESP32S3_DEV
-  case ESP_SLEEP_WAKEUP_TIMER: // RTC Alarm
+  case ESP_SLEEP_WAKEUP_TIMER: { // RTC Alarm
   #else
-  case ESP_SLEEP_WAKEUP_EXT0: // RTC Alarm
+  case ESP_SLEEP_WAKEUP_EXT0: { // RTC Alarm
   #endif
     RTC.read(currentTime);
+    if (_checkClockToolsEvents()) {
+      break;
+    }
     switch (guiState) {
     case WATCHFACE_STATE:
       showWatchFace(true); // partial updates on tick
-      if (settings.vibrateOClock) {
-        if (currentTime.Minute == 0) {
-          // The RTC wakes us up once per minute
-          vibMotor(75, 4);
-        }
+      if (settings.vibrateOClock && currentTime.Minute == 0) {
+        // The RTC wakes us up once per minute
+        vibMotor(75, 4);
       }
       break;
     case MAIN_MENU_STATE:
@@ -64,34 +118,73 @@ void Watchy::init(String datetime) {
       break;
     }
     break;
-  case ESP_SLEEP_WAKEUP_EXT1: // button Press
-    handleButtonPress();
+  }
+  case ESP_SLEEP_WAKEUP_EXT1: { // button Press
+    RTC.read(currentTime);
+    bool hadAlert = clockToolsData.alertFlags != 0 ||
+                    guiState == CLOCK_ALERT_STATE;
+    bool hasAlert = _checkClockToolsEvents();
+    if (hasAlert && !hadAlert) {
+      break; // Do not consume the button that happened to trigger an alert.
+    }
+    if (hadAlert) {
+      clockToolsData.alertFlags = 0;
+      _saveClockToolsState();
+      showWatchFace(false);
+    } else {
+      handleButtonPress();
+      RTC.read(currentTime);
+      _checkClockToolsEvents();
+    }
     break;
+  }
   #ifdef ARDUINO_ESP32S3_DEV
-  case ESP_SLEEP_WAKEUP_EXT0: // USB plug in
+  case ESP_SLEEP_WAKEUP_EXT0: { // USB plug in
     pinMode(USB_DET_PIN, INPUT);
     USB_PLUGGED_IN = (digitalRead(USB_DET_PIN) == 1);
-    if(guiState == WATCHFACE_STATE){
-      RTC.read(currentTime);
+    RTC.read(currentTime);
+    if (!_checkClockToolsEvents() && guiState == WATCHFACE_STATE) {
       showWatchFace(true);
     }
     break;
+  }
   #endif
-  default: // reset
+  default: { // reset
+    tmElements_t oldTime;
+    RTC.read(oldTime);
+    bool oldClockValid = clockToolsClockIsValid(oldTime);
+    if (!oldClockValid) {
+      bool stateChanged = clockToolsData.countdownActive ||
+                          clockToolsData.stopwatchRunning;
+      clockToolsData.countdownActive = false;
+      clockToolsData.countdownEnd = 0;
+      clockToolsData.stopwatchRunning = false;
+      clockToolsData.stopwatchStarted = 0;
+      if (stateChanged) {
+        _saveClockToolsState();
+      }
+    }
     RTC.config(datetime);
     _bmaConfig();
     #ifdef ARDUINO_ESP32S3_DEV
     pinMode(USB_DET_PIN, INPUT);
     USB_PLUGGED_IN = (digitalRead(USB_DET_PIN) == 1);
-    #endif    
+    #endif
     gmtOffset = settings.gmtOffset;
     RTC.read(currentTime);
     RTC.read(bootTime);
-    showWatchFace(false); // full update on reset
-    vibMotor(75, 4);
+    if (oldClockValid && clockToolsClockIsValid(currentTime)) {
+      _rebaseClockTools(static_cast<uint32_t>(makeTime(oldTime)),
+                        static_cast<uint32_t>(makeTime(currentTime)));
+    }
+    if (!_checkClockToolsEvents()) {
+      showWatchFace(false); // full update on reset
+      vibMotor(75, 4);
+    }
     // For some reason, seems to be enabled on first boot
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     break;
+  }
   }
   deepSleep();
 }
@@ -111,9 +204,9 @@ void Watchy::deepSleep() {
 
   rtc_clk_32k_enable(true);
   //rtc_clk_slow_freq_set(RTC_SLOW_FREQ_32K_XTAL);
-  struct tm timeinfo;
-  getLocalTime(&timeinfo);
-  int secToNextMin = 60 - timeinfo.tm_sec;
+  RTC.read(currentTime);
+  int second = currentTime.Second <= 59 ? currentTime.Second : 0;
+  int secToNextMin = 60 - second;
   esp_sleep_enable_timer_wakeup(secToNextMin * uS_TO_S_FACTOR);
   #else
   // Set GPIOs 0-39 to input to avoid power leaking out
@@ -162,6 +255,9 @@ void Watchy::handleButtonPress() {
         break;*/
       case 5:
         showSyncNTP();
+        break;
+      case 6:
+        _showClockTools();
         break;
       default:
         break;
@@ -245,6 +341,9 @@ void Watchy::handleButtonPress() {
           case 5:
             showSyncNTP();
             break;
+          case 6:
+            _showClockTools();
+            break;
           default:
             break;
           }
@@ -298,7 +397,7 @@ void Watchy::showMenu(byte menuIndex, bool partialRefresh) {
   const char *menuItems[] = {
       "About Watchy", "Vibrate Motor", "Show Accelerometer",
       "Set Time",     "Setup WiFi",    /*"Update Firmware",*/
-      "Sync NTP"};
+      "Sync NTP",     "Clock Tools"};
   for (int i = 0; i < MENU_LENGTH; i++) {
     yPos = MENU_HEIGHT + (MENU_HEIGHT * i);
     display.setCursor(0, yPos);
@@ -331,7 +430,7 @@ void Watchy::showFastMenu(byte menuIndex) {
   const char *menuItems[] = {
       "About Watchy", "Vibrate Motor", "Show Accelerometer",
       "Set Time",     "Setup WiFi",    /*"Update Firmware",*/
-      "Sync NTP"};
+      "Sync NTP",     "Clock Tools"};
   for (int i = 0; i < MENU_LENGTH; i++) {
     yPos = MENU_HEIGHT + (MENU_HEIGHT * i);
     display.setCursor(0, yPos);
@@ -349,6 +448,603 @@ void Watchy::showFastMenu(byte menuIndex) {
   display.display(true);
 
   guiState = MAIN_MENU_STATE;
+}
+
+void Watchy::_loadClockToolsState() {
+  if (clockToolsData.magic == CLOCK_TOOLS_MAGIC) {
+    return;
+  }
+
+  Preferences preferences;
+  preferences.begin("clocktools", true);
+  clockToolsData.magic = CLOCK_TOOLS_MAGIC;
+  clockToolsData.alarmEnabled = preferences.getBool("alarmOn", false);
+  clockToolsData.alarmHour = preferences.getUChar("alarmHour", 7);
+  clockToolsData.alarmMinute = preferences.getUChar("alarmMinute", 0);
+  clockToolsData.lastAlarmDay = preferences.getUInt("alarmDay", 0);
+  clockToolsData.countdownActive = preferences.getBool("timerOn", false);
+  clockToolsData.countdownPresetMinutes =
+      preferences.getUShort("timerMins", 5);
+  clockToolsData.countdownEnd = preferences.getUInt("timerEnd", 0);
+  clockToolsData.stopwatchRunning = preferences.getBool("swRunning", false);
+  clockToolsData.stopwatchStarted = preferences.getUInt("swStarted", 0);
+  clockToolsData.stopwatchElapsed = preferences.getUInt("swElapsed", 0);
+  clockToolsData.alertFlags = preferences.getUChar("alerts", 0) &
+                              (CLOCK_ALERT_ALARM | CLOCK_ALERT_TIMER);
+  clockToolsData.lastEventCheck = 0;
+  preferences.end();
+
+  if (clockToolsData.alarmHour > 23) {
+    clockToolsData.alarmHour = 7;
+  }
+  if (clockToolsData.alarmMinute > 59) {
+    clockToolsData.alarmMinute = 0;
+  }
+  if (clockToolsData.countdownPresetMinutes == 0 ||
+      clockToolsData.countdownPresetMinutes > 1439) {
+    clockToolsData.countdownPresetMinutes = 5;
+  }
+  if (clockToolsData.countdownEnd == 0) {
+    clockToolsData.countdownActive = false;
+  }
+  if (clockToolsData.stopwatchStarted == 0) {
+    clockToolsData.stopwatchRunning = false;
+  }
+}
+
+void Watchy::_saveClockToolsState() {
+  Preferences preferences;
+  preferences.begin("clocktools", false);
+  preferences.putBool("alarmOn", clockToolsData.alarmEnabled);
+  preferences.putUChar("alarmHour", clockToolsData.alarmHour);
+  preferences.putUChar("alarmMinute", clockToolsData.alarmMinute);
+  preferences.putUInt("alarmDay", clockToolsData.lastAlarmDay);
+  preferences.putBool("timerOn", clockToolsData.countdownActive);
+  preferences.putUShort("timerMins", clockToolsData.countdownPresetMinutes);
+  preferences.putUInt("timerEnd", clockToolsData.countdownEnd);
+  preferences.putBool("swRunning", clockToolsData.stopwatchRunning);
+  preferences.putUInt("swStarted", clockToolsData.stopwatchStarted);
+  preferences.putUInt("swElapsed", clockToolsData.stopwatchElapsed);
+  preferences.putUChar("alerts", clockToolsData.alertFlags);
+  preferences.end();
+}
+
+uint32_t Watchy::_clockEpoch() {
+  RTC.read(currentTime);
+  return static_cast<uint32_t>(makeTime(currentTime));
+}
+
+bool Watchy::_checkClockToolsEvents() {
+  bool triggered = false;
+  bool stateChanged = false;
+
+  if (clockToolsClockIsValid(currentTime)) {
+    uint32_t now = static_cast<uint32_t>(makeTime(currentTime));
+    uint32_t day =
+        static_cast<uint32_t>(tmYearToCalendar(currentTime.Year)) * 512UL +
+        static_cast<uint32_t>(currentTime.Month) * 32UL + currentTime.Day;
+    uint16_t currentMinute = static_cast<uint16_t>(currentTime.Hour) * 60 +
+                             currentTime.Minute;
+    uint16_t alarmMinute =
+        static_cast<uint16_t>(clockToolsData.alarmHour) * 60 +
+        clockToolsData.alarmMinute;
+    tmElements_t alarmTime = currentTime;
+    alarmTime.Hour = clockToolsData.alarmHour;
+    alarmTime.Minute = clockToolsData.alarmMinute;
+    alarmTime.Second = 0;
+    uint32_t alarmEpoch = static_cast<uint32_t>(makeTime(alarmTime));
+    uint32_t alarmDay = day;
+    if (now < alarmEpoch) {
+      // The most recent occurrence was yesterday. This matters if an app was
+      // left open across midnight when the alarm should have fired.
+      alarmEpoch -= 86400UL;
+      breakTime(static_cast<time_t>(alarmEpoch), alarmTime);
+      alarmDay =
+          static_cast<uint32_t>(tmYearToCalendar(alarmTime.Year)) * 512UL +
+          static_cast<uint32_t>(alarmTime.Month) * 32UL + alarmTime.Day;
+    }
+    bool crossedAlarm = clockToolsData.lastEventCheck != 0 &&
+                        clockToolsData.lastEventCheck < alarmEpoch &&
+                        now >= alarmEpoch;
+    bool inGracePeriod = currentMinute >= alarmMinute &&
+                         currentMinute - alarmMinute < 5;
+
+    // The crossing check catches alarms while another screen kept the watch
+    // awake. The grace period also tolerates a delayed minute wake.
+    if (clockToolsData.alarmEnabled &&
+        (crossedAlarm || inGracePeriod) &&
+        clockToolsData.lastAlarmDay != alarmDay) {
+      clockToolsData.lastAlarmDay = alarmDay;
+      clockToolsData.alertFlags |= CLOCK_ALERT_ALARM;
+      triggered = true;
+      stateChanged = true;
+    }
+
+    if (clockToolsData.countdownActive && now >= clockToolsData.countdownEnd) {
+      clockToolsData.countdownActive = false;
+      clockToolsData.countdownEnd = 0;
+      clockToolsData.alertFlags |= CLOCK_ALERT_TIMER;
+      triggered = true;
+      stateChanged = true;
+    }
+    clockToolsData.lastEventCheck = now;
+  } else if (clockToolsData.countdownActive ||
+             clockToolsData.stopwatchRunning) {
+    // V3's software RTC does not survive power loss. Do not leave restored
+    // absolute timestamps running against an uninitialised clock.
+    clockToolsData.countdownActive = false;
+    clockToolsData.countdownEnd = 0;
+    clockToolsData.stopwatchRunning = false;
+    clockToolsData.stopwatchStarted = 0;
+    stateChanged = true;
+  }
+
+  if (stateChanged) {
+    _saveClockToolsState();
+  }
+  if (triggered) {
+    _showClockToolsAlert();
+    vibMotor(200, 16);
+  }
+  if (clockToolsData.alertFlags != 0) {
+    if (guiState != CLOCK_ALERT_STATE) {
+      _showClockToolsAlert();
+    }
+    guiState = CLOCK_ALERT_STATE;
+    return true;
+  }
+  return false;
+}
+
+void Watchy::_showClockToolsAlert() {
+  display.setFullWindow();
+  display.fillScreen(GxEPD_BLACK);
+  display.setTextColor(GxEPD_WHITE);
+  display.setFont(&FreeMonoBold9pt7b);
+  display.setCursor(18, 45);
+  display.println("CLOCK ALERT");
+  display.setCursor(18, 90);
+  if (clockToolsData.alertFlags & CLOCK_ALERT_ALARM) {
+    display.println("ALARM");
+  }
+  if (clockToolsData.alertFlags & CLOCK_ALERT_TIMER) {
+    display.println("TIMER DONE");
+  }
+  display.setCursor(6, 165);
+  display.println("Press any button");
+  display.setCursor(32, 187);
+  display.println("to dismiss");
+  display.display(false);
+  guiState = CLOCK_ALERT_STATE;
+}
+
+int8_t Watchy::_waitForClockToolsButton(uint32_t timeoutMs) {
+  pinMode(MENU_BTN_PIN, INPUT);
+  pinMode(BACK_BTN_PIN, INPUT);
+  pinMode(UP_BTN_PIN, INPUT);
+  pinMode(DOWN_BTN_PIN, INPUT);
+
+  uint32_t started = millis();
+  uint32_t lastClockCheck = started;
+  while (clockToolsButtonPressed(MENU_BTN_PIN) ||
+         clockToolsButtonPressed(BACK_BTN_PIN) ||
+         clockToolsButtonPressed(UP_BTN_PIN) ||
+         clockToolsButtonPressed(DOWN_BTN_PIN)) {
+    if (millis() - started >= timeoutMs) {
+      return CLOCK_BUTTON_TIMEOUT;
+    }
+    delay(10);
+  }
+
+  while (millis() - started < timeoutMs) {
+    if (millis() - lastClockCheck >= 1000) {
+      RTC.read(currentTime);
+      if (_checkClockToolsEvents()) {
+        return CLOCK_BUTTON_ALERT;
+      }
+      lastClockCheck = millis();
+    }
+
+    int8_t button = CLOCK_BUTTON_TIMEOUT;
+    uint8_t pin = 0;
+    if (clockToolsButtonPressed(MENU_BTN_PIN)) {
+      button = CLOCK_BUTTON_MENU;
+      pin = MENU_BTN_PIN;
+    } else if (clockToolsButtonPressed(BACK_BTN_PIN)) {
+      button = CLOCK_BUTTON_BACK;
+      pin = BACK_BTN_PIN;
+    } else if (clockToolsButtonPressed(UP_BTN_PIN)) {
+      button = CLOCK_BUTTON_UP;
+      pin = UP_BTN_PIN;
+    } else if (clockToolsButtonPressed(DOWN_BTN_PIN)) {
+      button = CLOCK_BUTTON_DOWN;
+      pin = DOWN_BTN_PIN;
+    }
+
+    if (button != CLOCK_BUTTON_TIMEOUT) {
+      delay(30);
+      if (!clockToolsButtonPressed(pin)) {
+        continue;
+      }
+      while (clockToolsButtonPressed(pin) && millis() - started < timeoutMs) {
+        delay(10);
+      }
+      return button;
+    }
+    delay(10);
+  }
+  return CLOCK_BUTTON_TIMEOUT;
+}
+
+void Watchy::_drawClockToolsMenu(uint8_t selected, bool partialRefresh) {
+  uint32_t now = _clockEpoch();
+  uint32_t stopwatchSeconds = clockToolsData.stopwatchElapsed;
+  if (clockToolsData.stopwatchRunning && now >= clockToolsData.stopwatchStarted) {
+    stopwatchSeconds += now - clockToolsData.stopwatchStarted;
+  }
+
+  display.setFullWindow();
+  display.fillScreen(GxEPD_BLACK);
+  display.setTextColor(GxEPD_WHITE);
+  display.setFont(&FreeMonoBold9pt7b);
+  display.setCursor(28, 20);
+  display.println("CLOCK TOOLS");
+
+  display.setCursor(0, 52);
+  display.print(selected == 0 ? ">" : " ");
+  display.print("Alarm ");
+  printTwoDigits(clockToolsData.alarmHour);
+  display.print(":");
+  printTwoDigits(clockToolsData.alarmMinute);
+  display.println(clockToolsData.alarmEnabled ? " ON" : " OFF");
+
+  display.setCursor(0, 84);
+  display.print(selected == 1 ? ">" : " ");
+  display.print("Timer ");
+  if (clockToolsData.countdownActive) {
+    uint32_t remaining = now < clockToolsData.countdownEnd
+                             ? (clockToolsData.countdownEnd - now + 59) / 60
+                             : 0;
+    printTwoDigits(remaining / 60);
+    display.print(":");
+    printTwoDigits(remaining % 60);
+  } else {
+    printTwoDigits(clockToolsData.countdownPresetMinutes / 60);
+    display.print(":");
+    printTwoDigits(clockToolsData.countdownPresetMinutes % 60);
+  }
+
+  display.setCursor(0, 116);
+  display.print(selected == 2 ? ">" : " ");
+  display.print("Stopwatch ");
+  uint32_t stopwatchMinutes = stopwatchSeconds / 60;
+  printTwoDigits(stopwatchMinutes / 60);
+  display.print(":");
+  printTwoDigits(stopwatchMinutes % 60);
+
+  display.setCursor(12, 162);
+  display.println("MENU: Select");
+  display.setCursor(12, 187);
+  display.println("BACK: Exit");
+  display.display(partialRefresh);
+  guiState = APP_STATE;
+}
+
+void Watchy::_showClockTools() {
+  uint8_t selected = 0;
+  _drawClockToolsMenu(selected, false);
+
+  while (true) {
+    int8_t button = _waitForClockToolsButton();
+    if (button == CLOCK_BUTTON_ALERT) {
+      return;
+    }
+    if (button == CLOCK_BUTTON_TIMEOUT || button == CLOCK_BUTTON_BACK) {
+      showMenu(menuIndex, false);
+      return;
+    }
+    if (button == CLOCK_BUTTON_UP) {
+      selected = selected == 0 ? 2 : selected - 1;
+      _drawClockToolsMenu(selected, true);
+    } else if (button == CLOCK_BUTTON_DOWN) {
+      selected = selected == 2 ? 0 : selected + 1;
+      _drawClockToolsMenu(selected, true);
+    } else if (button == CLOCK_BUTTON_MENU) {
+      if (selected == 0) {
+        _showAlarmEditor();
+      } else if (selected == 1) {
+        _showCountdownEditor();
+      } else {
+        _showStopwatch();
+      }
+      if (clockToolsData.alertFlags != 0) {
+        return;
+      }
+      _drawClockToolsMenu(selected, false);
+    }
+  }
+}
+
+void Watchy::_showAlarmEditor() {
+  uint8_t hour = clockToolsData.alarmHour;
+  uint8_t minute = clockToolsData.alarmMinute;
+  bool enabled = clockToolsData.alarmEnabled;
+  uint8_t field = 0;
+
+  while (true) {
+    display.setFullWindow();
+    display.fillScreen(GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setFont(&FreeMonoBold9pt7b);
+    display.setCursor(58, 22);
+    display.println("ALARM");
+    display.setCursor(12, 60);
+    display.print(field == 0 ? ">" : " ");
+    display.print("Hour:   ");
+    printTwoDigits(hour);
+    display.setCursor(12, 90);
+    display.print(field == 1 ? ">" : " ");
+    display.print("Minute: ");
+    printTwoDigits(minute);
+    display.setCursor(12, 120);
+    display.print(field == 2 ? ">" : " ");
+    display.print("Enabled: ");
+    display.println(enabled ? "YES" : "NO");
+    display.setCursor(3, 160);
+    display.println("UP/DOWN: Change");
+    display.setCursor(3, 187);
+    display.println("MENU: Next/Save");
+    display.display(true);
+
+    int8_t button = _waitForClockToolsButton();
+    if (button == CLOCK_BUTTON_ALERT || button == CLOCK_BUTTON_TIMEOUT ||
+        button == CLOCK_BUTTON_BACK) {
+      return;
+    }
+    if (button == CLOCK_BUTTON_UP || button == CLOCK_BUTTON_DOWN) {
+      int8_t direction = button == CLOCK_BUTTON_DOWN ? 1 : -1;
+      if (field == 0) {
+        hour = (hour + direction + 24) % 24;
+      } else if (field == 1) {
+        minute = (minute + direction + 60) % 60;
+      } else {
+        enabled = !enabled;
+      }
+    } else if (button == CLOCK_BUTTON_MENU) {
+      if (field < 2) {
+        field++;
+      } else {
+        clockToolsData.alarmHour = hour;
+        clockToolsData.alarmMinute = minute;
+        clockToolsData.alarmEnabled = enabled;
+        clockToolsData.lastAlarmDay = 0;
+        RTC.read(currentTime);
+        uint16_t nowMinute = static_cast<uint16_t>(currentTime.Hour) * 60 +
+                             currentTime.Minute;
+        uint16_t selectedMinute = static_cast<uint16_t>(hour) * 60 + minute;
+        if (enabled && clockToolsClockIsValid(currentTime) &&
+            nowMinute >= selectedMinute && nowMinute - selectedMinute < 5) {
+          clockToolsData.lastAlarmDay =
+              static_cast<uint32_t>(tmYearToCalendar(currentTime.Year)) * 512UL +
+              static_cast<uint32_t>(currentTime.Month) * 32UL + currentTime.Day;
+        }
+        _saveClockToolsState();
+        return;
+      }
+    }
+  }
+}
+
+void Watchy::_showCountdownEditor() {
+  if (clockToolsData.countdownActive) {
+    while (true) {
+      uint32_t now = _clockEpoch();
+      uint32_t remaining = now < clockToolsData.countdownEnd
+                               ? (clockToolsData.countdownEnd - now + 59) / 60
+                               : 0;
+      display.setFullWindow();
+      display.fillScreen(GxEPD_BLACK);
+      display.setTextColor(GxEPD_WHITE);
+      display.setFont(&FreeMonoBold9pt7b);
+      display.setCursor(38, 35);
+      display.println("TIMER RUNNING");
+      display.setCursor(62, 85);
+      printTwoDigits(remaining / 60);
+      display.print(":");
+      printTwoDigits(remaining % 60);
+      display.setCursor(10, 145);
+      display.println("MENU: Cancel");
+      display.setCursor(10, 175);
+      display.println("BACK: Tools");
+      display.display(true);
+
+      int8_t button = _waitForClockToolsButton();
+      if (button == CLOCK_BUTTON_ALERT || button == CLOCK_BUTTON_TIMEOUT ||
+          button == CLOCK_BUTTON_BACK) {
+        return;
+      }
+      if (button == CLOCK_BUTTON_MENU) {
+        clockToolsData.countdownActive = false;
+        clockToolsData.countdownEnd = 0;
+        _saveClockToolsState();
+        return;
+      }
+    }
+  }
+
+  uint8_t hours = clockToolsData.countdownPresetMinutes / 60;
+  uint8_t minutes = clockToolsData.countdownPresetMinutes % 60;
+  uint8_t field = 0;
+  while (true) {
+    display.setFullWindow();
+    display.fillScreen(GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setFont(&FreeMonoBold9pt7b);
+    display.setCursor(58, 22);
+    display.println("TIMER");
+    display.setCursor(12, 70);
+    display.print(field == 0 ? ">" : " ");
+    display.print("Hours:   ");
+    printTwoDigits(hours);
+    display.setCursor(12, 105);
+    display.print(field == 1 ? ">" : " ");
+    display.print("Minutes: ");
+    printTwoDigits(minutes);
+    display.setCursor(3, 155);
+    display.println("UP/DOWN: Change");
+    display.setCursor(3, 185);
+    display.println("MENU: Next/Start");
+    display.display(true);
+
+    int8_t button = _waitForClockToolsButton();
+    if (button == CLOCK_BUTTON_ALERT || button == CLOCK_BUTTON_TIMEOUT ||
+        button == CLOCK_BUTTON_BACK) {
+      return;
+    }
+    if (button == CLOCK_BUTTON_UP || button == CLOCK_BUTTON_DOWN) {
+      int8_t direction = button == CLOCK_BUTTON_DOWN ? 1 : -1;
+      if (field == 0) {
+        hours = (hours + direction + 24) % 24;
+      } else {
+        minutes = (minutes + direction + 60) % 60;
+      }
+    } else if (button == CLOCK_BUTTON_MENU) {
+      if (field == 0) {
+        field = 1;
+      } else {
+        uint16_t duration = static_cast<uint16_t>(hours) * 60 + minutes;
+        if (duration == 0) {
+          duration = 1;
+        }
+        clockToolsData.countdownPresetMinutes = duration;
+        clockToolsData.countdownEnd = _clockEpoch() +
+                                      static_cast<uint32_t>(duration) * 60UL;
+        clockToolsData.countdownActive = true;
+        _saveClockToolsState();
+        return;
+      }
+    }
+  }
+}
+
+void Watchy::_showStopwatch() {
+  while (true) {
+    uint32_t now = _clockEpoch();
+    uint32_t elapsed = clockToolsData.stopwatchElapsed;
+    if (clockToolsData.stopwatchRunning && now >= clockToolsData.stopwatchStarted) {
+      elapsed += now - clockToolsData.stopwatchStarted;
+    }
+    uint32_t elapsedMinutes = elapsed / 60;
+
+    display.setFullWindow();
+    display.fillScreen(GxEPD_BLACK);
+    display.setTextColor(GxEPD_WHITE);
+    display.setFont(&FreeMonoBold9pt7b);
+    display.setCursor(42, 28);
+    display.println("STOPWATCH");
+    display.setCursor(62, 75);
+    printTwoDigits(elapsedMinutes / 60);
+    display.print(":");
+    printTwoDigits(elapsedMinutes % 60);
+    display.setCursor(55, 108);
+    display.println(clockToolsData.stopwatchRunning ? "RUNNING" : "PAUSED");
+    display.setCursor(4, 145);
+    display.println("MENU: Start/Pause");
+    display.setCursor(4, 170);
+    display.println("DOWN: Reset");
+    display.setCursor(4, 195);
+    display.println("BACK: Tools");
+    display.display(true);
+
+    int8_t button = _waitForClockToolsButton();
+    if (button == CLOCK_BUTTON_ALERT || button == CLOCK_BUTTON_TIMEOUT ||
+        button == CLOCK_BUTTON_BACK) {
+      return;
+    }
+    if (button == CLOCK_BUTTON_MENU) {
+      if (clockToolsData.stopwatchRunning) {
+        if (now >= clockToolsData.stopwatchStarted) {
+          clockToolsData.stopwatchElapsed +=
+              now - clockToolsData.stopwatchStarted;
+        }
+        clockToolsData.stopwatchRunning = false;
+        clockToolsData.stopwatchStarted = 0;
+      } else {
+        clockToolsData.stopwatchStarted = now;
+        clockToolsData.stopwatchRunning = true;
+      }
+      _saveClockToolsState();
+    } else if (button == CLOCK_BUTTON_DOWN) {
+      clockToolsData.stopwatchElapsed = 0;
+      clockToolsData.stopwatchStarted =
+          clockToolsData.stopwatchRunning ? now : 0;
+      _saveClockToolsState();
+    }
+  }
+}
+
+void Watchy::_rebaseClockTools(uint32_t oldEpoch, uint32_t newEpoch) {
+  constexpr uint32_t MIN_VALID_EPOCH = 1577836800UL; // 2020-01-01
+  if (oldEpoch < MIN_VALID_EPOCH || newEpoch < MIN_VALID_EPOCH) {
+    bool changed = clockToolsData.countdownActive ||
+                   clockToolsData.stopwatchRunning;
+    clockToolsData.countdownActive = false;
+    clockToolsData.countdownEnd = 0;
+    clockToolsData.stopwatchRunning = false;
+    clockToolsData.stopwatchStarted = 0;
+    if (changed) {
+      _saveClockToolsState();
+    }
+    return;
+  }
+  if (oldEpoch == newEpoch) {
+    return;
+  }
+  int64_t delta = static_cast<int64_t>(newEpoch) - oldEpoch;
+  bool changed = false;
+
+  tmElements_t oldTime;
+  tmElements_t newTime;
+  breakTime(static_cast<time_t>(oldEpoch), oldTime);
+  breakTime(static_cast<time_t>(newEpoch), newTime);
+  if (oldTime.Year != newTime.Year || oldTime.Month != newTime.Month ||
+      oldTime.Day != newTime.Day) {
+    clockToolsData.lastAlarmDay = 0;
+    changed = true;
+  }
+
+  if (clockToolsData.lastEventCheck != 0) {
+    int64_t rebasedCheck =
+        static_cast<int64_t>(clockToolsData.lastEventCheck) + delta;
+    clockToolsData.lastEventCheck =
+        rebasedCheck > 0 && rebasedCheck <= UINT32_MAX
+            ? static_cast<uint32_t>(rebasedCheck)
+            : newEpoch;
+  }
+
+  if (clockToolsData.countdownActive) {
+    int64_t rebased = static_cast<int64_t>(clockToolsData.countdownEnd) + delta;
+    if (rebased > 0 && rebased <= UINT32_MAX) {
+      clockToolsData.countdownEnd = static_cast<uint32_t>(rebased);
+    } else {
+      clockToolsData.countdownActive = false;
+      clockToolsData.countdownEnd = 0;
+    }
+    changed = true;
+  }
+  if (clockToolsData.stopwatchRunning) {
+    int64_t rebased = static_cast<int64_t>(clockToolsData.stopwatchStarted) + delta;
+    if (rebased > 0 && rebased <= UINT32_MAX) {
+      clockToolsData.stopwatchStarted = static_cast<uint32_t>(rebased);
+    } else {
+      clockToolsData.stopwatchRunning = false;
+      clockToolsData.stopwatchStarted = 0;
+    }
+    changed = true;
+  }
+  if (changed) {
+    _saveClockToolsState();
+  }
 }
 
 void Watchy::showAbout() {
@@ -448,7 +1144,17 @@ void Watchy::setTime() {
 
   display.setFullWindow();
 
+  bool clockAlert = false;
+  uint32_t lastClockCheck = millis();
   while (1) {
+    if (millis() - lastClockCheck >= 1000) {
+      RTC.read(currentTime);
+      if (_checkClockToolsEvents()) {
+        clockAlert = true;
+        break;
+      }
+      lastClockCheck = millis();
+    }
 
     if (digitalRead(MENU_BTN_PIN) == ACTIVE_LOW) {
       setIndex++;
@@ -568,6 +1274,10 @@ void Watchy::setTime() {
     display.display(true); // partial refresh
   }
 
+  if (clockAlert) {
+    return;
+  }
+
   tmElements_t tm;
   tm.Month  = month;
   tm.Day    = day;
@@ -576,7 +1286,11 @@ void Watchy::setTime() {
   tm.Minute = minute;
   tm.Second = 0;
 
+  tmElements_t oldTime;
+  RTC.read(oldTime);
+  uint32_t oldEpoch = static_cast<uint32_t>(makeTime(oldTime));
   RTC.set(tm);
+  _rebaseClockTools(oldEpoch, static_cast<uint32_t>(makeTime(tm)));
 
   showMenu(menuIndex, false);
 }
@@ -591,6 +1305,8 @@ void Watchy::showAccelerometer() {
 
   long previousMillis = 0;
   long interval       = 200;
+  uint32_t lastClockCheck = millis();
+  bool clockAlert = false;
 
   guiState = APP_STATE;
 
@@ -599,6 +1315,15 @@ void Watchy::showAccelerometer() {
   while (1) {
 
     unsigned long currentMillis = millis();
+
+    if (currentMillis - lastClockCheck >= 1000) {
+      RTC.read(currentTime);
+      if (_checkClockToolsEvents()) {
+        clockAlert = true;
+        break;
+      }
+      lastClockCheck = currentMillis;
+    }
 
     if (digitalRead(BACK_BTN_PIN) == ACTIVE_LOW) {
       break;
@@ -650,7 +1375,9 @@ void Watchy::showAccelerometer() {
     }
   }
 
-  showMenu(menuIndex, false);
+  if (!clockAlert) {
+    showMenu(menuIndex, false);
+  }
 }
 
 void Watchy::showWatchFace(bool partialRefresh) {
@@ -1151,8 +1878,12 @@ bool Watchy::syncNTP(long gmt, String ntpServer) {
   if (!timeClient.forceUpdate()) {
     return false; // NTP sync failed
   }
+  tmElements_t oldTime;
+  RTC.read(oldTime);
+  uint32_t oldEpoch = static_cast<uint32_t>(makeTime(oldTime));
   tmElements_t tm;
   breakTime((time_t)timeClient.getEpochTime(), tm);
   RTC.set(tm);
+  _rebaseClockTools(oldEpoch, static_cast<uint32_t>(makeTime(tm)));
   return true;
 }
