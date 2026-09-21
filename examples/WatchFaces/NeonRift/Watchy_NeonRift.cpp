@@ -16,8 +16,31 @@ RTC_DATA_ATTR bool cachedWeatherStale = false;
 RTC_DATA_ATTR int32_t cachedUtcOffset = 0;
 RTC_DATA_ATTR bool cachedUtcOffsetValid = false;
 RTC_DATA_ATTR int64_t lastWeatherAttempt = -1;
+RTC_DATA_ATTR int64_t lastNtpAttempt = -1;
 RTC_DATA_ATTR int64_t lastNtpSync = -1;
 RTC_DATA_ATTR bool timezoneSyncPending = false;
+
+uint8_t batteryPercent(float voltage) {
+    struct BatteryPoint {
+        float voltage;
+        uint8_t percent;
+    };
+    static const BatteryPoint curve[] = {
+        {3.30f, 0}, {3.50f, 5}, {3.60f, 10}, {3.70f, 20},
+        {3.75f, 30}, {3.79f, 40}, {3.83f, 50}, {3.87f, 60},
+        {3.92f, 70}, {3.98f, 80}, {4.08f, 90}, {4.20f, 100}
+    };
+    if (voltage <= curve[0].voltage) return 0;
+    for (uint8_t index = 1; index < sizeof(curve) / sizeof(curve[0]); index++) {
+        if (voltage <= curve[index].voltage) {
+            const BatteryPoint &low = curve[index - 1];
+            const BatteryPoint &high = curve[index];
+            const float position = (voltage - low.voltage) / (high.voltage - low.voltage);
+            return low.percent + round(position * (high.percent - low.percent));
+        }
+    }
+    return 100;
+}
 }
 
 // Compact 3x5 font: 0-9 followed by A-Z. It keeps every label crisp at the
@@ -46,12 +69,21 @@ static const uint8_t LARGE_DIGITS[10][7] PROGMEM = {
 WatchyNeonRift::WatchyNeonRift(const watchySettings &settings,
                                const char *postalCode,
                                const char *countryCode,
-                               uint16_t ntpSyncInterval)
+                               uint16_t ntpSyncInterval,
+                               bool enableAutoWeather,
+                               bool enableAutoNtp)
     : Watchy(settings), postalCode(postalCode), countryCode(countryCode),
-      ntpSyncInterval(ntpSyncInterval) {}
+      ntpSyncInterval(ntpSyncInterval), enableAutoWeather(enableAutoWeather),
+      enableAutoNtp(enableAutoNtp) {}
 
 void WatchyNeonRift::drawWatchFace() {
-    refreshWeather();
+#ifndef WATCHY_DIAGNOSTIC_AWAKE
+    if (enableAutoWeather) {
+        refreshWeather();
+    } else if (enableAutoNtp) {
+        refreshNtp();
+    }
+#endif
     display.fillScreen(GxEPD_BLACK);
     drawFrame();
     drawLunarCycle();
@@ -104,15 +136,49 @@ void WatchyNeonRift::refreshWeather() {
     // Weather can refresh without an NTP exchange. Sync daily, immediately
     // after a timezone/DST change, or after a clock reset.
     const uint16_t syncInterval = ntpSyncInterval > 0 ? ntpSyncInterval : 1440;
-    const bool ntpDue = timezoneSyncPending || lastNtpSync < 0 ||
-        lastNtpSync > minuteStamp || minuteStamp - lastNtpSync >= syncInterval;
-    if (ntpDue && syncNTP(utcOffset)) {
-        RTC.read(currentTime);
-        lastNtpSync = getMinuteStamp();
-        lastWeatherAttempt = lastNtpSync;
-        timezoneSyncPending = false;
+    const bool ntpDue = enableAutoNtp && (timezoneSyncPending || lastNtpSync < 0 ||
+        lastNtpSync > minuteStamp || minuteStamp - lastNtpSync >= syncInterval);
+    if (ntpDue) {
+        lastNtpAttempt = minuteStamp;
+        if (syncNTP(utcOffset)) {
+            RTC.read(currentTime);
+            lastNtpSync = getMinuteStamp();
+            lastNtpAttempt = lastNtpSync;
+            lastWeatherAttempt = lastNtpSync;
+            timezoneSyncPending = false;
+        }
     }
 
+    WiFi.mode(WIFI_OFF);
+    btStop();
+}
+
+void WatchyNeonRift::refreshNtp() {
+#ifdef ARDUINO_ESP32S3_DEV
+    // Wi-Fi current spikes can reset a battery-powered Watchy v3. Defer the
+    // daily sync until USB is present; the RTC keeps running between syncs.
+    if (!USB_PLUGGED_IN) return;
+#endif
+    const uint32_t locationKey = getLocationKey();
+    loadCachedLocation(locationKey);
+    const int32_t utcOffset = cachedUtcOffsetValid ? cachedUtcOffset : settings.gmtOffset;
+    setTimezoneOffset(utcOffset);
+
+    const int64_t minuteStamp = getMinuteStamp();
+    const uint16_t syncInterval = ntpSyncInterval > 0 ? ntpSyncInterval : 1440;
+    const bool syncDue = lastNtpSync < 0 || lastNtpSync > minuteStamp ||
+        minuteStamp - lastNtpSync >= syncInterval;
+    const bool retryDue = lastNtpAttempt < 0 || lastNtpAttempt > minuteStamp ||
+        minuteStamp - lastNtpAttempt >= 60;
+    if (!syncDue || !retryDue) return;
+
+    lastNtpAttempt = minuteStamp;
+    if (!connectWiFi(10000)) return;
+    if (syncNTP(utcOffset)) {
+        RTC.read(currentTime);
+        lastNtpSync = getMinuteStamp();
+        lastNtpAttempt = lastNtpSync;
+    }
     WiFi.mode(WIFI_OFF);
     btStop();
 }
@@ -431,13 +497,24 @@ void WatchyNeonRift::drawDataPanel() {
 
 void WatchyNeonRift::drawStatusBar() {
     const float voltage = getBatteryVoltage();
-    int16_t percent = static_cast<int16_t>((voltage - 3.30f) * 111.0f);
-    percent = constrain(percent, 0, 100);
+    uint8_t percent = batteryPercent(voltage);
+    bool charging = false;
+    bool chargeComplete = false;
+#ifdef ARDUINO_ESP32S3_DEV
+    pinMode(CHRG_STATUS_PIN, INPUT_PULLUP);
+    charging = USB_PLUGGED_IN && digitalRead(CHRG_STATUS_PIN) == LOW;
+    chargeComplete = USB_PLUGGED_IN && !charging && voltage > 3.60f;
+    if (chargeComplete) percent = 100;
+#endif
 
     display.drawLine(7, 157, 193, 157, GxEPD_WHITE);
     drawTinyText("BATTERY", 10, 163);
     char battery[5];
-    snprintf(battery, sizeof(battery), "%d%%", percent);
+    if (charging) {
+        snprintf(battery, sizeof(battery), "CHG");
+    } else {
+        snprintf(battery, sizeof(battery), "%d%%", percent);
+    }
     drawTinyText(battery, 158, 174, 2);
 
     display.drawRect(10, 174, 140, 10, GxEPD_WHITE);

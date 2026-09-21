@@ -6,15 +6,19 @@
 class WatchyNeonRift : public Watchy {
 public:
     WatchyNeonRift(const watchySettings &settings, const char *postalCode,
-                   const char *countryCode, uint16_t ntpSyncInterval);
+                   const char *countryCode, uint16_t ntpSyncInterval,
+                   bool enableAutoWeather, bool enableAutoNtp);
     void drawWatchFace() override;
 
 private:
     const char *postalCode;
     const char *countryCode;
     uint16_t ntpSyncInterval;
+    bool enableAutoWeather;
+    bool enableAutoNtp;
 
     void refreshWeather();
+    void refreshNtp();
     bool loadCachedLocation(uint32_t locationKey);
     bool geocodePostalCode(uint32_t locationKey);
     bool fetchOpenMeteoWeather(int32_t &utcOffset);

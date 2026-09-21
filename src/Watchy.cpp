@@ -80,6 +80,11 @@ void Watchy::init(String datetime) {
   esp_sleep_wakeup_cause_t wakeup_reason;
   wakeup_reason = esp_sleep_get_wakeup_cause(); // get wake up reason
   #ifdef ARDUINO_ESP32S3_DEV
+    // GPIO0 is both Watchy's UP button and the ESP32-S3 boot strap. Release
+    // the sleep hold while awake, but keep its pull-up active so a wake does
+    // not fall into the ROM downloader.
+    rtc_gpio_hold_dis((gpio_num_t)UP_BTN_PIN);
+    pinMode(UP_BTN_PIN, INPUT_PULLUP);
     Wire.begin(WATCHY_V3_SDA, WATCHY_V3_SCL);     // init i2c
   #else
     Wire.begin(SDA, SCL);                         // init i2c
@@ -189,6 +194,9 @@ void Watchy::init(String datetime) {
   deepSleep();
 }
 void Watchy::deepSleep() {
+  #ifdef WATCHY_DIAGNOSTIC_AWAKE
+    return;
+  #endif
   display.hibernate();
   RTC.clearAlarm();        // resets the alarm flag in the RTC
   #ifdef ARDUINO_ESP32S3_DEV
@@ -200,7 +208,9 @@ void Watchy::deepSleep() {
       BTN_PIN_MASK,
       ESP_EXT1_WAKEUP_ANY_LOW); // enable deep sleep wake on button press
   rtc_gpio_set_direction((gpio_num_t)UP_BTN_PIN, RTC_GPIO_MODE_INPUT_ONLY);
+  rtc_gpio_pulldown_dis((gpio_num_t)UP_BTN_PIN);
   rtc_gpio_pullup_en((gpio_num_t)UP_BTN_PIN);
+  rtc_gpio_hold_en((gpio_num_t)UP_BTN_PIN);
 
   rtc_clk_32k_enable(true);
   //rtc_clk_slow_freq_set(RTC_SLOW_FREQ_32K_XTAL);
@@ -1473,7 +1483,17 @@ weatherData Watchy::_getWeatherData(String cityID, String lat, String lon, Strin
 
 float Watchy::getBatteryVoltage() {
   #ifdef ARDUINO_ESP32S3_DEV
-    return analogReadMilliVolts(BATT_ADC_PIN) / 1000.0f * ADC_VOLTAGE_DIVIDER;
+    // The ESP32-S3 ADC is noisy enough for a single reading to move the
+    // displayed charge by several percent. Discard the first conversion and
+    // average a short burst.
+    analogReadMilliVolts(BATT_ADC_PIN);
+    uint32_t totalMilliVolts = 0;
+    constexpr uint8_t sampleCount = 16;
+    for (uint8_t sample = 0; sample < sampleCount; sample++) {
+      totalMilliVolts += analogReadMilliVolts(BATT_ADC_PIN);
+      delayMicroseconds(250);
+    }
+    return totalMilliVolts / (1000.0f * sampleCount) * ADC_VOLTAGE_DIVIDER;
   #else
   if (RTC.rtcType == DS3231) {
     return analogReadMilliVolts(BATT_ADC_PIN) / 1000.0f *
@@ -1678,6 +1698,11 @@ bool Watchy::connectWiFi() {
 }
 
 bool Watchy::connectWiFi(uint32_t timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  #ifdef ARDUINO_ESP32S3_DEV
+    // Reduce radio peak current on the battery-powered Watchy v3.
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  #endif
   if (WL_CONNECT_FAILED ==
       WiFi.begin()) { // WiFi not setup, you can also use hard coded credentials
                       // with WiFi.begin(SSID,PASS);
@@ -1870,19 +1895,51 @@ void Watchy::setTimezoneOffset(long gmt) {
 }
 
 bool Watchy::syncNTP(long gmt, String ntpServer) {
-  // NTP sync - call after connecting to
-  // WiFi and remember to turn it back off
-  WiFiUDP ntpUDP;
-  NTPClient timeClient(ntpUDP, ntpServer.c_str(), gmt);
-  timeClient.begin();
-  if (!timeClient.forceUpdate()) {
-    return false; // NTP sync failed
+  // A single one-second UDP attempt is unreliable on networks where DNS or
+  // Wi-Fi power saving takes a moment to settle. Try the configured server,
+  // then two independent fallbacks, without leaving the radio enabled.
+  const String servers[] = {ntpServer, "time.cloudflare.com", "time.google.com"};
+  uint32_t epoch = 0;
+  delay(250);
+  for (uint8_t serverIndex = 0; serverIndex < 3 && epoch == 0; serverIndex++) {
+    if (servers[serverIndex].isEmpty()) {
+      continue;
+    }
+    bool duplicate = false;
+    for (uint8_t previous = 0; previous < serverIndex; previous++) {
+      if (servers[serverIndex] == servers[previous]) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate) {
+      continue;
+    }
+
+    WiFiUDP ntpUDP;
+    NTPClient timeClient(ntpUDP, servers[serverIndex].c_str(), gmt);
+    timeClient.begin();
+    for (uint8_t attempt = 0; attempt < 2; attempt++) {
+      if (timeClient.forceUpdate()) {
+        const uint32_t candidate = timeClient.getEpochTime();
+        if (candidate >= 1577836800UL && candidate < 4102444800UL) {
+          epoch = candidate;
+          break;
+        }
+      }
+      delay(250);
+    }
+    timeClient.end();
   }
+  if (epoch == 0) {
+    return false;
+  }
+
   tmElements_t oldTime;
   RTC.read(oldTime);
   uint32_t oldEpoch = static_cast<uint32_t>(makeTime(oldTime));
   tmElements_t tm;
-  breakTime((time_t)timeClient.getEpochTime(), tm);
+  breakTime((time_t)epoch, tm);
   RTC.set(tm);
   _rebaseClockTools(oldEpoch, static_cast<uint32_t>(makeTime(tm)));
   return true;

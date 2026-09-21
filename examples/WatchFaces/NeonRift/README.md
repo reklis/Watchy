@@ -9,7 +9,7 @@ It shows:
 - lunar phase and illumination percentage
 - step count
 - local temperature fallback and key-free live weather for a configured postal code
-- battery percentage and segmented gauge
+- smoothed LiPo battery estimate, charging state, and segmented gauge
 - Wi-Fi, Bluetooth, and USB power status (USB power is available on Watchy v3)
 
 The artwork is drawn with display primitives and two tiny bitmap fonts, so the
@@ -22,7 +22,10 @@ face has no external asset or font dependency.
 1. Open `NeonRift.ino` in Arduino IDE.
 2. Set `POSTAL_CODE` and the two-letter `COUNTRY_CODE` in `settings.h`.
 3. Choose `metric` or `imperial` with `WEATHER_UNIT`.
-4. Select your Watchy board and upload.
+4. Leave `ENABLE_AUTO_WEATHER` set to `0` to avoid weather traffic.
+5. Leave `ENABLE_AUTO_NTP` set to `1` for a small daily time sync, or set it to
+   `0` for completely offline operation.
+6. Select your Watchy board and upload.
 
 ## Compile with Devbox
 
@@ -39,8 +42,15 @@ devbox run build-v30 # Watchy PCB v3.0 / current SQFMI-WATCHY-10
 
 Firmware binaries are written under `.devbox/build/<revision>/`.
 
-NeonRift resolves the postal code through [Zippopotam.us](https://www.zippopotam.us/),
-then gets current weather and the local UTC offset from
+Automatic weather is disabled by default for maximum stability. The face uses
+its onboard temperature sensor and performs only a daily NTP sync. On Watchy
+v3, automatic NTP waits for USB power to avoid battery-side Wi-Fi current
+spikes; the RTC keeps time between syncs. A failed NTP sync is retried after one
+hour, not on every minute wake. Set `ENABLE_AUTO_NTP` to `0` for completely
+offline operation. Wi-Fi menu actions remain available.
+
+When `ENABLE_AUTO_WEATHER` is set to `1`, NeonRift resolves the postal code
+through [Zippopotam.us](https://www.zippopotam.us/), then gets current weather and the local UTC offset from
 [Open-Meteo](https://open-meteo.com/). Neither service requires an API key.
 The resolved coordinates are stored in ESP32 NVS and reused through power
 cycles; a successful lookup runs again only when the postal or country setting
