@@ -106,6 +106,18 @@ The preview uses a representative time, date, step count, network state, and
 a `NOMINAL` battery while charging (`CHG` and `USB ON`). The hardware face
 replaces those values with live readings.
 
+### Shareable screen montage
+
+`NeonRift-montage.png` is a labeled 1920x1080 PNG containing the watch face
+and all six clock-tools screens. It uses representative sample data and keeps
+each screen's pixels intact with nearest-neighbor scaling. Generate it with:
+
+```sh
+python3 render_montage.py
+```
+
+![NeonRift screen montage](NeonRift-montage.png)
+
 ### Clock-tools screens
 
 Clock Tools uses NeonRift's fonts, chamfered cards, inverted selection, status
