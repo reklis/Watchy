@@ -9,7 +9,7 @@ It shows:
 - lunar phase and illumination percentage
 - step count
 - local temperature fallback and key-free live weather for a configured postal code
-- smoothed LiPo battery estimate, charging state, and segmented gauge
+- LOW / NOMINAL / HIGH battery voltage band and a separate CHG indicator
 - Wi-Fi, Bluetooth, and USB power status (USB power is available on Watchy v3)
 
 The artwork is drawn with display primitives and two tiny bitmap fonts, so the
@@ -63,6 +63,35 @@ marked `STALE`; before the first successful update, the display falls back to
 Watchy's onboard temperature as `LOCAL`. Timekeeping continues with the
 configured or most recently resolved UTC offset.
 
+## Battery readings
+
+The face shows broad voltage bands instead of a percentage or progress bar:
+
+- `LOW`: below 3.60 V
+- `NOMINAL`: 3.60 V to below 3.90 V
+- `HIGH`: 3.90 V or above, or a saturated ADC reading
+- `UNKNOWN`: invalid voltage reading
+
+`CHG` appears separately at the right while charging. Charger status never
+changes the battery category, and `HIGH` does **not** mean fully charged.
+These are rough voltage indicators, not remaining-runtime estimates.
+
+Watchy v3 has a measurement-range limitation: its 100k/360k divider feeds
+about 3.29 V into the ESP32-S3 ADC at a 4.20 V battery voltage, above the
+ADC's specified 3.1 V range. A clipped reading around 3.9 V maps to roughly
+65–70% on the LiPo curve even when the battery is full. Averaging does not
+recover the missing voltage information.
+
+When repeated raw samples hit the ADC rail, the face shows `HIGH`. In **About
+Watchy**, `V+` and `ADC at limit` confirm clipping. This is not evidence of a
+battery that failed to charge. It also cannot prove the battery is full.
+Accurate upper-range voltage readings require a hardware divider with more
+attenuation or a fuel gauge. Charging voltage, load, temperature, and cell
+aging still affect the category.
+
+References: [Watchy v3 schematic](https://github.com/sqfmi/Watchy-Hardware/blob/v3.0/WatchySchematic.pdf)
+and [ESP32 ADC ranges](https://docs.espressif.com/projects/arduino-esp32/en/latest/api/adc.html#analogsetattenuation).
+
 ## Preview
 
 `NeonRift-preview.png` is an 800x800 nearest-neighbor preview of the native
@@ -74,4 +103,5 @@ python3 render_preview.py
 ```
 
 The preview uses a representative time, date, step count, network state, and
-battery charge. The hardware face replaces those values with live readings.
+a `NOMINAL` battery while charging (`CHG` and `USB ON`). The hardware face
+replaces those values with live readings.

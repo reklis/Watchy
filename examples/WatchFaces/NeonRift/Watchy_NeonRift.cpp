@@ -3,6 +3,7 @@
 #include <cmath>
 
 namespace {
+constexpr int16_t RIGHT_TEXT_EDGE = 189;
 RTC_DATA_ATTR uint32_t cachedLocationKey = 0;
 RTC_DATA_ATTR bool locationCacheChecked = false;
 RTC_DATA_ATTR float cachedLatitude = 0.0f;
@@ -20,31 +21,31 @@ RTC_DATA_ATTR int64_t lastNtpAttempt = -1;
 RTC_DATA_ATTR int64_t lastNtpSync = -1;
 RTC_DATA_ATTR bool timezoneSyncPending = false;
 
-uint8_t batteryPercent(float voltage) {
-    struct BatteryPoint {
-        float voltage;
-        uint8_t percent;
-    };
-    static const BatteryPoint curve[] = {
-        {3.30f, 0}, {3.50f, 5}, {3.60f, 10}, {3.70f, 20},
-        {3.75f, 30}, {3.79f, 40}, {3.83f, 50}, {3.87f, 60},
-        {3.92f, 70}, {3.98f, 80}, {4.08f, 90}, {4.20f, 100}
-    };
-    if (voltage <= curve[0].voltage) return 0;
-    for (uint8_t index = 1; index < sizeof(curve) / sizeof(curve[0]); index++) {
-        if (voltage <= curve[index].voltage) {
-            const BatteryPoint &low = curve[index - 1];
-            const BatteryPoint &high = curve[index];
-            const float position = (voltage - low.voltage) / (high.voltage - low.voltage);
-            return low.percent + round(position * (high.percent - low.percent));
-        }
+const char *batteryLabel(float voltage, bool adcSaturated) {
+    if (!std::isfinite(voltage) || voltage <= 0.0f) return "UNKNOWN";
+    // Broad voltage bands, not capacity estimates. A clipped reading is
+    // high enough to overrange the v3 ADC, but does not prove a full charge.
+    if (adcSaturated || voltage >= 3.90f) return "HIGH";
+    if (voltage < 3.60f) return "LOW";
+    return "NOMINAL";
+}
+
+uint8_t tinyGlyphWidth(char) {
+    return 3;
+}
+
+int16_t tinyTextWidth(const char *value, uint8_t scale = 1) {
+    if (!*value) return 0;
+    const uint8_t gap = scale > 1 ? 2 : 1;
+    int16_t width = 0;
+    while (*value) {
+        width += (tinyGlyphWidth(*value++) + gap) * scale;
     }
-    return 100;
+    return width - gap * scale;
 }
 }
 
-// Compact 3x5 font: 0-9 followed by A-Z. It keeps every label crisp at the
-// Watchy's native 200x200 resolution and avoids bundling another font.
+// Monospaced 3x5 font: 0-9 followed by A-Z, with a stylized mirrored N.
 static const uint8_t TINY_FONT[36][5] PROGMEM = {
     {7, 5, 5, 5, 7}, {2, 6, 2, 2, 7}, {7, 1, 7, 4, 7}, {7, 1, 7, 1, 7},
     {5, 5, 7, 1, 1}, {7, 4, 7, 1, 7}, {7, 4, 7, 5, 7}, {7, 1, 1, 1, 1},
@@ -52,7 +53,7 @@ static const uint8_t TINY_FONT[36][5] PROGMEM = {
     {2, 5, 7, 5, 5}, {6, 5, 6, 5, 6}, {3, 4, 4, 4, 3}, {6, 5, 5, 5, 6},
     {7, 4, 6, 4, 7}, {7, 4, 6, 4, 4}, {3, 4, 5, 5, 3}, {5, 5, 7, 5, 5},
     {7, 2, 2, 2, 7}, {1, 1, 1, 5, 2}, {5, 5, 6, 5, 5}, {4, 4, 4, 4, 7},
-    {5, 7, 7, 5, 5}, {5, 7, 7, 7, 5}, {2, 5, 5, 5, 2}, {6, 5, 6, 4, 4},
+    {5, 7, 7, 5, 5}, {5, 3, 7, 6, 5}, {2, 5, 5, 5, 2}, {6, 5, 6, 4, 4},
     {2, 5, 5, 3, 1}, {6, 5, 6, 5, 5}, {3, 4, 2, 1, 6}, {7, 2, 2, 2, 2},
     {5, 5, 5, 5, 7}, {5, 5, 5, 5, 2}, {5, 5, 7, 7, 5}, {5, 5, 2, 5, 5},
     {5, 5, 2, 2, 2}, {7, 1, 2, 4, 7}
@@ -436,7 +437,7 @@ void WatchyNeonRift::drawLunarCycle() {
 
     char light[9];
     snprintf(light, sizeof(light), "%d%% LIT", illumination);
-    drawTinyText(light, 158, 8);
+    drawTinyText(light, RIGHT_TEXT_EDGE - tinyTextWidth(light), 8);
     drawTinyText(PHASE_NAMES[phaseIndex], 158, 17);
 }
 
@@ -453,6 +454,7 @@ void WatchyNeonRift::drawClock() {
 }
 
 void WatchyNeonRift::drawDataPanel() {
+    constexpr int16_t footerY = 143;
     static const char *const DAYS[] = {"???", "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
     static const char *const MONTHS[] = {"???", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
                                         "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
@@ -463,11 +465,11 @@ void WatchyNeonRift::drawDataPanel() {
     display.drawLine(73, 106, 73, 152, GxEPD_WHITE);
     display.drawLine(134, 106, 134, 152, GxEPD_WHITE);
     drawTinyText("DATE", 10, 109);
-    drawTinyText(DAYS[weekday], 10, 119, 2);
+    drawTinyText(DAYS[weekday], 10, 121, 2);
     char date[12];
     snprintf(date, sizeof(date), "%s %02d %04d", MONTHS[month], currentTime.Day,
              tmYearToCalendar(currentTime.Year));
-    drawTinyText(date, 10, 141);
+    drawTinyText(date, 10, footerY);
 
     if (currentTime.Hour == 0 && currentTime.Minute == 0) {
         sensor.resetStepCounter();
@@ -476,7 +478,7 @@ void WatchyNeonRift::drawDataPanel() {
     snprintf(steps, sizeof(steps), "%05lu", static_cast<unsigned long>(sensor.getCounter() % 100000));
     drawTinyText("STEPS", 80, 109);
     drawTinyText(steps, 80, 121, 2);
-    drawTinyText("DAILY", 80, 143);
+    drawTinyText("DAILY", 80, footerY);
 
     int16_t temperatureValue = cachedTemperature;
     const bool isMetric = settings.weatherUnit != "imperial";
@@ -492,37 +494,26 @@ void WatchyNeonRift::drawDataPanel() {
              isMetric ? 'C' : 'F');
     drawTinyText("WEATHER", 141, 109);
     drawTinyText(temperature, 141, 121, 2);
-    drawTinyText(condition, 141, 143);
+    drawTinyText(condition, 141, footerY);
 }
 
 void WatchyNeonRift::drawStatusBar() {
-    const float voltage = getBatteryVoltage();
-    uint8_t percent = batteryPercent(voltage);
+    bool adcSaturated = false;
+    const float voltage = getBatteryVoltage(&adcSaturated);
+    const char *level = batteryLabel(voltage, adcSaturated);
     bool charging = false;
-    bool chargeComplete = false;
 #ifdef ARDUINO_ESP32S3_DEV
     pinMode(CHRG_STATUS_PIN, INPUT_PULLUP);
     charging = USB_PLUGGED_IN && digitalRead(CHRG_STATUS_PIN) == LOW;
-    chargeComplete = USB_PLUGGED_IN && !charging && voltage > 3.60f;
-    if (chargeComplete) percent = 100;
+    // A high STAT pin means "not charging", not necessarily "full".
+    // Never substitute USB/charger status for a capacity measurement.
 #endif
 
     display.drawLine(7, 157, 193, 157, GxEPD_WHITE);
     drawTinyText("BATTERY", 10, 163);
-    char battery[5];
+    drawTinyText(level, 10, 174, 2);
     if (charging) {
-        snprintf(battery, sizeof(battery), "CHG");
-    } else {
-        snprintf(battery, sizeof(battery), "%d%%", percent);
-    }
-    drawTinyText(battery, 158, 174, 2);
-
-    display.drawRect(10, 174, 140, 10, GxEPD_WHITE);
-    const int16_t fillWidth = 136 * percent / 100;
-    display.fillRect(12, 176, fillWidth, 6, GxEPD_WHITE);
-    const int16_t segments[] = {39, 67, 95, 123};
-    for (const int16_t x : segments) {
-        display.drawLine(x, 175, x, 182, GxEPD_BLACK);
+        drawTinyText("CHG", RIGHT_TEXT_EDGE - tinyTextWidth("CHG", 2), 174, 2);
     }
 
     const char *wifiStatus = WIFI_CONFIGURED ? "WIFI ON" : "WIFI OFF";
@@ -532,9 +523,9 @@ void WatchyNeonRift::drawStatusBar() {
 #else
     const char *usbStatus = "USB N/A";
 #endif
-    drawTinyText(wifiStatus, 34 - static_cast<int16_t>(strlen(wifiStatus) * 2), 190);
-    drawTinyText(bleStatus, 100 - static_cast<int16_t>(strlen(bleStatus) * 2), 190);
-    drawTinyText(usbStatus, 166 - static_cast<int16_t>(strlen(usbStatus) * 2), 190);
+    drawTinyText(wifiStatus, 34 - tinyTextWidth(wifiStatus) / 2, 190);
+    drawTinyText(bleStatus, 100 - tinyTextWidth(bleStatus) / 2, 190);
+    drawTinyText(usbStatus, 166 - tinyTextWidth(usbStatus) / 2, 190);
 }
 
 void WatchyNeonRift::drawDigit(uint8_t value, int16_t x, int16_t y) {
@@ -551,15 +542,17 @@ void WatchyNeonRift::drawDigit(uint8_t value, int16_t x, int16_t y) {
 
 void WatchyNeonRift::drawTinyText(const char *value, int16_t x, int16_t y, uint8_t scale) {
     while (*value) {
+        const uint8_t columns = tinyGlyphWidth(*value);
         for (uint8_t row = 0; row < 5; ++row) {
             const uint8_t bits = glyphRow(*value, row);
-            for (uint8_t column = 0; column < 3; ++column) {
-                if (bits & (1 << (2 - column))) {
+            for (uint8_t column = 0; column < columns; ++column) {
+                if (bits & (1 << (columns - 1 - column))) {
                     display.fillRect(x + column * scale, y + row * scale, scale, scale, GxEPD_WHITE);
                 }
             }
         }
-        x += 4 * scale;
+        // Give enlarged glyphs a two-column gap; keep small labels compact.
+        x += (columns + (scale > 1 ? 2 : 1)) * scale;
         ++value;
     }
 }
@@ -579,12 +572,14 @@ uint8_t WatchyNeonRift::glyphRow(char value, uint8_t row) {
     static const uint8_t colon[] = {0, 2, 0, 2, 0};
     static const uint8_t percent[] = {5, 1, 2, 4, 5};
     static const uint8_t dash[] = {0, 0, 7, 0, 0};
+    static const uint8_t plus[] = {0, 2, 7, 2, 0};
     static const uint8_t period[] = {0, 0, 0, 0, 2};
     switch (value) {
         case '/': return slash[row];
         case ':': return colon[row];
         case '%': return percent[row];
         case '-': return dash[row];
+        case '+': return plus[row];
         case '.': return period[row];
         default: return 0;
     }

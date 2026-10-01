@@ -11,10 +11,11 @@ import struct
 import zlib
 
 W = H = 200
+RIGHT_TEXT_EDGE = 189
 BLACK, WHITE = 0, 1
 pixels = [[BLACK for _ in range(W)] for _ in range(H)]
 
-# Three-bit-wide, five-row glyphs shared with Watchy_NeonRift.cpp.
+# Monospaced 3x5 glyphs shared with firmware, including the mirrored N.
 FONT = {
     "0": (7, 5, 5, 5, 7), "1": (2, 6, 2, 2, 7),
     "2": (7, 1, 7, 4, 7), "3": (7, 1, 7, 1, 7),
@@ -27,7 +28,7 @@ FONT = {
     "G": (3, 4, 5, 5, 3), "H": (5, 5, 7, 5, 5),
     "I": (7, 2, 2, 2, 7), "J": (1, 1, 1, 5, 2),
     "K": (5, 5, 6, 5, 5), "L": (4, 4, 4, 4, 7),
-    "M": (5, 7, 7, 5, 5), "N": (5, 7, 7, 7, 5),
+    "M": (5, 7, 7, 5, 5), "N": (5, 3, 7, 6, 5),
     "O": (2, 5, 5, 5, 2), "P": (6, 5, 6, 4, 4),
     "Q": (2, 5, 5, 3, 1), "R": (6, 5, 6, 5, 5),
     "S": (3, 4, 2, 1, 6), "T": (7, 2, 2, 2, 2),
@@ -94,14 +95,25 @@ def circle(cx, cy, radius, color=WHITE):
             x += 1; error += x * 2 + 1
 
 
+def glyph_width(ch):
+    return 3
+
+
+def text_width(value, scale=1):
+    gap = 2 if scale > 1 else 1
+    return (sum(glyph_width(ch) + gap for ch in value) - gap) * scale if value else 0
+
+
 def text(value, x, y, scale=1):
     for ch in value.upper():
         rows = FONT.get(ch, FONT[" "])
+        columns = glyph_width(ch)
         for row, bits in enumerate(rows):
-            for col in range(3):
-                if bits & (1 << (2 - col)):
+            for col in range(columns):
+                if bits & (1 << (columns - 1 - col)):
                     rect(x + col * scale, y + row * scale, scale, scale, fill=True)
-        x += 4 * scale
+        # Match firmware: a wider gap for enlarged text only.
+        x += (columns + (2 if scale > 1 else 1)) * scale
 
 
 def digit(value, x, y):
@@ -145,7 +157,8 @@ def lunar_cycle(year, month, day, hour, minute):
             if lit:
                 dot(cx + px, cy + py)
     circle(cx, cy, radius)
-    text(f"{illumination}% LIT", 158, 8)
+    light = f"{illumination}% LIT"
+    text(light, RIGHT_TEXT_EDGE - text_width(light), 8)
     text(phase_name, 158, 17)
 
 
@@ -157,36 +170,44 @@ def clock(hour, minute):
 
 
 def data_panel():
+    footer_y = 143
     line(7, 103, 193, 103)
     line(73, 106, 73, 152)
     line(134, 106, 134, 152)
     text("DATE", 10, 109)
-    text("FRI", 10, 119, 2)
-    text("MAR 14 2025", 10, 141)
+    text("FRI", 10, 121, 2)
+    text("MAR 14 2025", 10, footer_y)
     text("STEPS", 80, 109)
     text("08421", 80, 121, 2)
-    text("DAILY", 80, 143)
+    text("DAILY", 80, footer_y)
     text("WEATHER", 141, 109)
     text("21C", 141, 121, 2)
-    text("CLEAR", 141, 143)
+    text("CLEAR", 141, footer_y)
 
 
-def status_bar(percent):
+def battery_label(voltage, adc_saturated=False):
+    if not math.isfinite(voltage) or voltage <= 0:
+        return "UNKNOWN"
+    if adc_saturated or voltage >= 3.90:
+        return "HIGH"
+    return "LOW" if voltage < 3.60 else "NOMINAL"
+
+
+def status_bar(voltage, adc_saturated=False, charging=False, usb=False):
     line(7, 157, 193, 157)
     text("BATTERY", 10, 163)
-    text(f"{percent}%", 158, 174, 2)
-    rect(10, 174, 140, 10)
-    fill_width = (136 * percent) // 100
-    rect(12, 176, fill_width, 6, fill=True)
-    for x in (39, 67, 95, 123):
-        line(x, 175, x, 182, BLACK)
-    statuses = (("WIFI ON", 34), ("BLE ON", 100), ("USB OFF", 166))
+    text(battery_label(voltage, adc_saturated), 10, 174, 2)
+    if usb and charging:
+        text("CHG", RIGHT_TEXT_EDGE - text_width("CHG", 2), 174, 2)
+    statuses = (("WIFI ON", 34), ("BLE ON", 100), ("USB ON" if usb else "USB OFF", 166))
     for status, center_x in statuses:
-        text(status, center_x - len(status) * 2, 190)
+        text(status, center_x - text_width(status) // 2, 190)
 
 
-def render():
-    frame(); lunar_cycle(2025, 3, 14, 23, 47); clock(23, 47); data_panel(); status_bar(84)
+def render(voltage=3.78, adc_saturated=False, charging=True, usb=True):
+    rect(0, 0, W, H, BLACK, fill=True)
+    frame(); lunar_cycle(2025, 3, 14, 23, 47); clock(23, 47); data_panel()
+    status_bar(voltage, adc_saturated, charging, usb)
 
 
 def png_bytes(scale):

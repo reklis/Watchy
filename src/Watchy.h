@@ -30,7 +30,9 @@
   #include "hal/rtc_io_types.h"
   #include "driver/rtc_io.h"
   #define uS_TO_S_FACTOR 1000000ULL  //Conversion factor for micro seconds to seconds
-  #define ADC_VOLTAGE_DIVIDER ((360.0f+100.0f)/360.0f) //Voltage divider at battery ADC  
+  // v3: R8 = 100k (battery to ADC), R9 = 360k (ADC to ground).
+  // 4.2V becomes 3.29V: above the ESP32-S3's specified 3.1V ADC range.
+  #define ADC_VOLTAGE_DIVIDER ((360.0f+100.0f)/360.0f)
 #else
   #include "WatchyRTC.h"
 #endif
@@ -77,7 +79,8 @@ public:
   explicit Watchy(const watchySettings &s) : settings(s) {} // constructor
   void init(String datetime = "");
   void deepSleep();
-  float getBatteryVoltage();
+  // Optional flag: the v3 ADC hit its upper rail; voltage is only a lower bound.
+  float getBatteryVoltage(bool *adcSaturated = nullptr);
   uint8_t getBoardRevision();
   void vibMotor(uint8_t intervalMs = 100, uint8_t length = 20);
 

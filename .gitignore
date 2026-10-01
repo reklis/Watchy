@@ -70,3 +70,4 @@ nbproject
 .vscode
 .devbox/
 .venv/
+__pycache__/

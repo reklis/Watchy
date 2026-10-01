@@ -1071,9 +1071,13 @@ void Watchy::showAbout() {
   display.println(getBoardRevision());
 
   display.print("Batt: ");
-  float voltage = getBatteryVoltage();
+  bool adcSaturated = false;
+  float voltage = getBatteryVoltage(&adcSaturated);
   display.print(voltage);
-  display.println("V");
+  display.println(adcSaturated ? "V+" : "V");
+  if (adcSaturated) {
+    display.println("ADC at limit");
+  }
 
   #ifndef ARDUINO_ESP32S3_DEV
   display.print("Uptime: ");
@@ -1481,18 +1485,28 @@ weatherData Watchy::_getWeatherData(String cityID, String lat, String lon, Strin
   return currentWeather;
 }
 
-float Watchy::getBatteryVoltage() {
+float Watchy::getBatteryVoltage(bool *adcSaturated) {
+  if (adcSaturated) *adcSaturated = false;
   #ifdef ARDUINO_ESP32S3_DEV
+    // Use the widest range explicitly; averaging cannot fix ADC clipping.
+    analogSetPinAttenuation(BATT_ADC_PIN, ADC_11db);
     // The ESP32-S3 ADC is noisy enough for a single reading to move the
     // displayed charge by several percent. Discard the first conversion and
     // average a short burst.
     analogReadMilliVolts(BATT_ADC_PIN);
     uint32_t totalMilliVolts = 0;
+    uint8_t saturatedSamples = 0;
     constexpr uint8_t sampleCount = 16;
     for (uint8_t sample = 0; sample < sampleCount; sample++) {
       totalMilliVolts += analogReadMilliVolts(BATT_ADC_PIN);
+      // Raw conversions bypass analogReadResolution(), so the S3 rail is
+      // always 4095. Require repeated near-rail readings, not one noise spike.
+      if (adcSaturated && analogReadRaw(BATT_ADC_PIN) >= 4090) {
+        saturatedSamples++;
+      }
       delayMicroseconds(250);
     }
+    if (adcSaturated) *adcSaturated = saturatedSamples >= sampleCount / 2;
     return totalMilliVolts / (1000.0f * sampleCount) * ADC_VOLTAGE_DIVIDER;
   #else
   if (RTC.rtcType == DS3231) {
