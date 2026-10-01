@@ -105,3 +105,39 @@ python3 render_preview.py
 The preview uses a representative time, date, step count, network state, and
 a `NOMINAL` battery while charging (`CHG` and `USB ON`). The hardware face
 replaces those values with live readings.
+
+### Clock-tools screens
+
+Clock Tools uses NeonRift's fonts, chamfered cards, inverted selection, status
+badges, and compact button hints. The menu, alarm editor, timer editor/running
+view, stopwatch, and alert screen share the renderer in `src/ClockToolsUI.h`.
+Selected hours/minutes are underlined; the alarm's enabled row is inverted
+when editing its state. Button hints change from Next to Save/Start as needed.
+
+In the alarm and timer editors, **UP increases** the selected number and
+**DOWN decreases** it. Hours wrap between 23 and 0, minutes between 59 and 0;
+fields wrap independently. Save/cancel behavior, RTC timing, persistence, and
+refresh cadence are unchanged. Timer and stopwatch values remain **HH:MM**, not MM:SS; the
+running timer rounds remaining minutes up, and the stopwatch displays whole
+elapsed minutes. No extra display or radio wakeups are introduced.
+
+These images use sample values, not live readings. Host tests compare their
+pixels against the actual firmware renderer, including each selection/edit
+state and long stopwatch values. Upload a new board-specific build to apply
+the styling to your watch.
+
+![Clock-tools menu and alarm editor](ClockTools-preview.png)
+
+The four-screen gallery is `ClockTools-screens-preview.png`. Regenerate it,
+the paired preview, and individual 800x800 screens with:
+
+```sh
+python3 render_clock_tools_preview.py
+```
+
+Run the rendering and button-control regressions from the repository root
+(with Python and g++ installed):
+
+```sh
+python3 -m unittest discover -s tests -v
+```

@@ -1,4 +1,5 @@
 #include "Watchy.h"
+#include "ClockToolsUI.h"
 #include <Preferences.h>
 
 #ifdef ARDUINO_ESP32S3_DEV
@@ -56,16 +57,11 @@ struct ClockToolsData {
 };
 
 RTC_DATA_ATTR ClockToolsData clockToolsData;
+watchy_ui::ClockToolsUI<decltype(Watchy::display)> clockToolsUI(
+    Watchy::display, GxEPD_WHITE, GxEPD_BLACK);
 
 bool clockToolsButtonPressed(uint8_t pin) {
   return digitalRead(pin) == ACTIVE_LOW;
-}
-
-void printTwoDigits(uint32_t value) {
-  if (value < 10) {
-    Watchy::display.print("0");
-  }
-  Watchy::display.print(value);
 }
 
 bool clockToolsClockIsValid(const tmElements_t &time) {
@@ -608,22 +604,8 @@ bool Watchy::_checkClockToolsEvents() {
 
 void Watchy::_showClockToolsAlert() {
   display.setFullWindow();
-  display.fillScreen(GxEPD_BLACK);
-  display.setTextColor(GxEPD_WHITE);
-  display.setFont(&FreeMonoBold9pt7b);
-  display.setCursor(18, 45);
-  display.println("CLOCK ALERT");
-  display.setCursor(18, 90);
-  if (clockToolsData.alertFlags & CLOCK_ALERT_ALARM) {
-    display.println("ALARM");
-  }
-  if (clockToolsData.alertFlags & CLOCK_ALERT_TIMER) {
-    display.println("TIMER DONE");
-  }
-  display.setCursor(6, 165);
-  display.println("Press any button");
-  display.setCursor(32, 187);
-  display.println("to dismiss");
+  clockToolsUI.alert(clockToolsData.alertFlags & CLOCK_ALERT_ALARM,
+                     clockToolsData.alertFlags & CLOCK_ALERT_TIMER);
   display.display(false);
   guiState = CLOCK_ALERT_STATE;
 }
@@ -693,49 +675,18 @@ void Watchy::_drawClockToolsMenu(uint8_t selected, bool partialRefresh) {
     stopwatchSeconds += now - clockToolsData.stopwatchStarted;
   }
 
-  display.setFullWindow();
-  display.fillScreen(GxEPD_BLACK);
-  display.setTextColor(GxEPD_WHITE);
-  display.setFont(&FreeMonoBold9pt7b);
-  display.setCursor(28, 20);
-  display.println("CLOCK TOOLS");
-
-  display.setCursor(0, 52);
-  display.print(selected == 0 ? ">" : " ");
-  display.print("Alarm ");
-  printTwoDigits(clockToolsData.alarmHour);
-  display.print(":");
-  printTwoDigits(clockToolsData.alarmMinute);
-  display.println(clockToolsData.alarmEnabled ? " ON" : " OFF");
-
-  display.setCursor(0, 84);
-  display.print(selected == 1 ? ">" : " ");
-  display.print("Timer ");
+  uint32_t timerMinutes = clockToolsData.countdownPresetMinutes;
   if (clockToolsData.countdownActive) {
-    uint32_t remaining = now < clockToolsData.countdownEnd
-                             ? (clockToolsData.countdownEnd - now + 59) / 60
-                             : 0;
-    printTwoDigits(remaining / 60);
-    display.print(":");
-    printTwoDigits(remaining % 60);
-  } else {
-    printTwoDigits(clockToolsData.countdownPresetMinutes / 60);
-    display.print(":");
-    printTwoDigits(clockToolsData.countdownPresetMinutes % 60);
+    timerMinutes = now < clockToolsData.countdownEnd
+                       ? (clockToolsData.countdownEnd - now + 59) / 60
+                       : 0;
   }
-
-  display.setCursor(0, 116);
-  display.print(selected == 2 ? ">" : " ");
-  display.print("Stopwatch ");
-  uint32_t stopwatchMinutes = stopwatchSeconds / 60;
-  printTwoDigits(stopwatchMinutes / 60);
-  display.print(":");
-  printTwoDigits(stopwatchMinutes % 60);
-
-  display.setCursor(12, 162);
-  display.println("MENU: Select");
-  display.setCursor(12, 187);
-  display.println("BACK: Exit");
+  const watchy_ui::ClockToolsMenuSnapshot state = {
+      static_cast<uint32_t>(clockToolsData.alarmHour) * 60 + clockToolsData.alarmMinute,
+      clockToolsData.alarmEnabled, timerMinutes, clockToolsData.countdownActive,
+      stopwatchSeconds / 60, clockToolsData.stopwatchRunning};
+  display.setFullWindow();
+  clockToolsUI.menu(state, selected);
   display.display(partialRefresh);
   guiState = APP_STATE;
 }
@@ -783,27 +734,7 @@ void Watchy::_showAlarmEditor() {
 
   while (true) {
     display.setFullWindow();
-    display.fillScreen(GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setFont(&FreeMonoBold9pt7b);
-    display.setCursor(58, 22);
-    display.println("ALARM");
-    display.setCursor(12, 60);
-    display.print(field == 0 ? ">" : " ");
-    display.print("Hour:   ");
-    printTwoDigits(hour);
-    display.setCursor(12, 90);
-    display.print(field == 1 ? ">" : " ");
-    display.print("Minute: ");
-    printTwoDigits(minute);
-    display.setCursor(12, 120);
-    display.print(field == 2 ? ">" : " ");
-    display.print("Enabled: ");
-    display.println(enabled ? "YES" : "NO");
-    display.setCursor(3, 160);
-    display.println("UP/DOWN: Change");
-    display.setCursor(3, 187);
-    display.println("MENU: Next/Save");
+    clockToolsUI.alarm(hour, minute, enabled, field);
     display.display(true);
 
     int8_t button = _waitForClockToolsButton();
@@ -812,7 +743,7 @@ void Watchy::_showAlarmEditor() {
       return;
     }
     if (button == CLOCK_BUTTON_UP || button == CLOCK_BUTTON_DOWN) {
-      int8_t direction = button == CLOCK_BUTTON_DOWN ? 1 : -1;
+      const int8_t direction = button == CLOCK_BUTTON_UP ? 1 : -1;
       if (field == 0) {
         hour = (hour + direction + 24) % 24;
       } else if (field == 1) {
@@ -853,19 +784,7 @@ void Watchy::_showCountdownEditor() {
                                ? (clockToolsData.countdownEnd - now + 59) / 60
                                : 0;
       display.setFullWindow();
-      display.fillScreen(GxEPD_BLACK);
-      display.setTextColor(GxEPD_WHITE);
-      display.setFont(&FreeMonoBold9pt7b);
-      display.setCursor(38, 35);
-      display.println("TIMER RUNNING");
-      display.setCursor(62, 85);
-      printTwoDigits(remaining / 60);
-      display.print(":");
-      printTwoDigits(remaining % 60);
-      display.setCursor(10, 145);
-      display.println("MENU: Cancel");
-      display.setCursor(10, 175);
-      display.println("BACK: Tools");
+      clockToolsUI.timerRunning(remaining);
       display.display(true);
 
       int8_t button = _waitForClockToolsButton();
@@ -887,23 +806,7 @@ void Watchy::_showCountdownEditor() {
   uint8_t field = 0;
   while (true) {
     display.setFullWindow();
-    display.fillScreen(GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setFont(&FreeMonoBold9pt7b);
-    display.setCursor(58, 22);
-    display.println("TIMER");
-    display.setCursor(12, 70);
-    display.print(field == 0 ? ">" : " ");
-    display.print("Hours:   ");
-    printTwoDigits(hours);
-    display.setCursor(12, 105);
-    display.print(field == 1 ? ">" : " ");
-    display.print("Minutes: ");
-    printTwoDigits(minutes);
-    display.setCursor(3, 155);
-    display.println("UP/DOWN: Change");
-    display.setCursor(3, 185);
-    display.println("MENU: Next/Start");
+    clockToolsUI.timerEditor(hours, minutes, field);
     display.display(true);
 
     int8_t button = _waitForClockToolsButton();
@@ -912,7 +815,7 @@ void Watchy::_showCountdownEditor() {
       return;
     }
     if (button == CLOCK_BUTTON_UP || button == CLOCK_BUTTON_DOWN) {
-      int8_t direction = button == CLOCK_BUTTON_DOWN ? 1 : -1;
+      const int8_t direction = button == CLOCK_BUTTON_UP ? 1 : -1;
       if (field == 0) {
         hours = (hours + direction + 24) % 24;
       } else {
@@ -947,23 +850,7 @@ void Watchy::_showStopwatch() {
     uint32_t elapsedMinutes = elapsed / 60;
 
     display.setFullWindow();
-    display.fillScreen(GxEPD_BLACK);
-    display.setTextColor(GxEPD_WHITE);
-    display.setFont(&FreeMonoBold9pt7b);
-    display.setCursor(42, 28);
-    display.println("STOPWATCH");
-    display.setCursor(62, 75);
-    printTwoDigits(elapsedMinutes / 60);
-    display.print(":");
-    printTwoDigits(elapsedMinutes % 60);
-    display.setCursor(55, 108);
-    display.println(clockToolsData.stopwatchRunning ? "RUNNING" : "PAUSED");
-    display.setCursor(4, 145);
-    display.println("MENU: Start/Pause");
-    display.setCursor(4, 170);
-    display.println("DOWN: Reset");
-    display.setCursor(4, 195);
-    display.println("BACK: Tools");
+    clockToolsUI.stopwatch(elapsedMinutes, clockToolsData.stopwatchRunning);
     display.display(true);
 
     int8_t button = _waitForClockToolsButton();
